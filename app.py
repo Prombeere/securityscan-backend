@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
 """
-Security Scanner Backend v3.3 - Main Flask Application
+Security Scanner Backend v3.3.1 - Main Flask Application
 Orchestrates 24 security scanning modules with real HTTP requests
 + Kimi K2-0711-preview AI analysis + Blind SQLi PoC Detector
 + WPScan, Nuclei, Nikto, SQLMap, Gobuster, FFUF, HTTPX, CVE
@@ -120,7 +119,7 @@ def severity_score(severity):
 def index():
     return jsonify({
         'name': 'Security Scanner Backend',
-        'version': '3.3.0',
+        'version': '3.3.1',
         'modules_loaded': len(SCANNER_MODULES),
         'modules_total': len(MODULE_DEFINITIONS),
         'modules': [name for name, _, _ in SCANNER_MODULES],
@@ -157,8 +156,6 @@ def _get_kimi_key():
 def _get_kimi_api_url():
     """Get Kimi API URL - auto-detects based on key format"""
     key = _get_kimi_key()
-    # CRITICAL: kimi.com Code keys need /coding/v1/ path!
-    # Docs: https://www.kimi.com/code/docs/#api-%E6%8E%A5%E5%85%A5
     if key.startswith('sk-kimi-'):
         return 'https://api.kimi.com/coding/v1/chat/completions'
     return os.environ.get('KIMI_API_URL', 'https://api.moonshot.cn/v1/chat/completions')
@@ -167,7 +164,6 @@ def _get_kimi_api_url():
 def _get_kimi_model():
     """Get correct model name based on key format"""
     key = _get_kimi_key()
-    # kimi.com Code API uses 'kimi-for-coding' as model ID
     if key.startswith('sk-kimi-'):
         return 'kimi-for-coding'
     return 'kimi-k2-0711-preview'
@@ -204,7 +200,7 @@ def kimi_test():
         resp = urllib.request.urlopen(req, timeout=15)
         result = json.loads(resp.read().decode('utf-8'))
         diagnostics['status'] = 'success'
-        diagnostics['message'] = 'Kimi K2 funktioniert!'
+        diagnostics['message'] = 'Kimi API funktioniert!'
         diagnostics['credits_used'] = True
     except urllib.error.HTTPError as e:
         err = e.read().decode('utf-8', errors='ignore')[:1000] if hasattr(e, 'read') else ''
@@ -251,7 +247,6 @@ def kimi_debug():
         result['api_tests'] = {'error': 'No key found after cleaning'}
         return jsonify(result)
     
-    # Test ALL API endpoint combinations
     api_urls_to_test = [
         ('api.moonshot.cn', 'https://api.moonshot.cn/v1/chat/completions', 'kimi-k2-0711-preview'),
         ('api.kimi.com (WRONG path)', 'https://api.kimi.com/v1/chat/completions', 'kimi-k2-0711-preview'),
@@ -318,29 +313,40 @@ def scan():
     if not modules_to_run:
         return jsonify({'error': 'No modules available'}), 500
 
+    print(f"\n{'='*60}")
+    print(f"[SCAN START] Target: {target} | Modules: {len(modules_to_run)}")
+    print(f"{'='*60}\n")
+
     start_time = time.time()
     all_results = {}
     all_findings = []
     phase_log = []
 
-    with ThreadPoolExecutor(max_workers=min(len(modules_to_run), 12)) as executor:
-        future_to_module = {
-            executor.submit(run_scanner, name, mod, target): (name, desc)
-            for name, mod, desc in modules_to_run
-        }
+    # CRITICAL FIX: try/except around ThreadPool to prevent backend crash
+    try:
+        with ThreadPoolExecutor(max_workers=min(len(modules_to_run), 12)) as executor:
+            future_to_module = {
+                executor.submit(run_scanner, name, mod, target): (name, desc)
+                for name, mod, desc in modules_to_run
+            }
 
-        for i, future in enumerate(as_completed(future_to_module), 1):
-            name, desc = future_to_module[future]
-            try:
-                result = future.result(timeout=120)
-                all_results[name] = result
-                if result['findings']:
-                    all_findings.extend(result['findings'])
-                phase_log.append({'phase': i, 'module': name, 'description': desc,
-                                  'status': result['status'], 'findings_count': len(result['findings'])})
-            except Exception as e:
-                phase_log.append({'phase': i, 'module': name, 'description': desc,
-                                  'status': 'timeout', 'findings_count': 0, 'error': str(e)})
+            for i, future in enumerate(as_completed(future_to_module), 1):
+                name, desc = future_to_module[future]
+                try:
+                    result = future.result(timeout=120)
+                    all_results[name] = result
+                    if result['findings']:
+                        all_findings.extend(result['findings'])
+                    phase_log.append({'phase': i, 'module': name, 'description': desc,
+                                      'status': result['status'], 'findings_count': len(result['findings'])})
+                    print(f"[PHASE {i}] {name}: {result['status']} ({len(result['findings'])} findings)")
+                except Exception as e:
+                    phase_log.append({'phase': i, 'module': name, 'description': desc,
+                                      'status': 'timeout', 'findings_count': 0, 'error': str(e)})
+                    print(f"[PHASE {i}] {name}: TIMEOUT - {str(e)}")
+    except Exception as e:
+        print(f"[CRITICAL] ThreadPool failed: {e}")
+        traceback.print_exc()
 
     elapsed = time.time() - start_time
     all_findings.sort(key=lambda f: severity_score(f.get('severity', 'info')), reverse=True)
@@ -371,22 +377,29 @@ def scan():
             except Exception as e:
                 print(f"[KIMI K2] Error: {e}")
 
+    print(f"\n[SCAN COMPLETE] {target} | {elapsed:.1f}s | {len(all_findings)} findings | Risk: {risk_score}/100")
+    print(f"{'='*60}\n")
+
     return jsonify({
         'target': target,
         'scan_time': datetime.utcnow().isoformat(),
         'duration_seconds': round(elapsed, 2),
         'modules_scanned': len(modules_to_run),
         'modules_completed': len([p for p in phase_log if p['status'] == 'completed']),
+        'modules_error': len([p for p in phase_log if p['status'] == 'error']),
         'risk_score': risk_score,
         'risk_level': risk_level,
         'summary': {'total_findings': len(all_findings), 'severity_breakdown': severity_counts},
         'phases': phase_log,
         'ai_analysis': {
             'enabled': ai_enabled,
+            'model': _get_kimi_model() if ai_enabled else None,
             'findings_count': len(ai_findings),
             'executive_summary': ai_report
         },
         'findings': all_findings,
+        'modules': {name: {'status': res['status'], 'findings_count': len(res['findings'])}
+                    for name, res in all_results.items()}
     })
 
 
@@ -425,5 +438,5 @@ def server_error(error):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    print(f"Starting Security Scanner Backend v3.3 on port {port}")
+    print(f"Starting Security Scanner Backend v3.3.1 on port {port}")
     app.run(host='0.0.0.0', port=port)
