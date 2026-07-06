@@ -1,177 +1,136 @@
 #!/usr/bin/env python3
 """
-KIMI K2 API INTEGRATION - Advanced Security Analysis
-Uses Kimi K2-0711-preview (strongest model) for deep vulnerability analysis
+KIMI API INTEGRATION - Intelligente Analyse mit Moonshot AI
+Nutzt die Kimi API für Advanced Analysis der Scan-Ergebnisse
 """
 
 import json, os
 
-KIMI_API_URL = "https://api.moonshot.cn/v1/chat/completions"
-# Kimi K2-0711-preview: strongest model for complex security analysis
-KIMI_MODEL = "kimi-k2-0711-preview"
-
-
+# Kimi API Configuration - Key wird DYNAMISCH gelesen (nicht beim Import!)
 def _get_key():
-    """Read API key dynamically - removes ALL whitespace, newlines, quotes"""
+    """Lies API Key dynamisch - entfernt alle Newlines/Spaces/Quotes"""
     key = os.environ.get('KIMI_API_KEY', '')
-    # CRITICAL: Keys can contain newlines from copy-paste
+    # WICHTIG: Keys koennen durch Copy-Paste Newlines enthalten
     key = key.replace('\n', '').replace('\r', '').replace(' ', '')
     key = key.strip().strip('"').strip("'")
     return key
 
+KIMI_API_KEY = _get_key()  # Initialer Wert
+KIMI_MODEL = "kimi-k2-0711-preview"
+
+
+def _get_api_url():
+    """Auto-detect API URL - kimi.com keys use api.kimi.com"""
+    key = _get_key()
+    if key.startswith('sk-kimi-'):
+        return 'https://api.kimi.com/v1/chat/completions'
+    return os.environ.get('KIMI_API_URL', 'https://api.moonshot.cn/v1/chat/completions')
+
 
 def analyze_with_kimi(target, findings):
-    """Deep security analysis using Kimi K2 - returns enhanced findings"""
-    api_key = _get_key()
-    if not api_key or api_key == 'your-api-key-here':
-        return [{
-            "id": "AI-ERR",
-            "severity": "info",
-            "type": "ai_error",
-            "title": "Kimi K2 API Key nicht gesetzt",
-            "url": target,
-            "evidence": "Kein gueltiger KIMI_API_KEY gefunden.",
-            "remediation": "Replit Secrets -> KIMI_API_KEY hinzufuegen. Dann Backend Stop/Run."
-        }]
-
+    """
+    Sende Scan-Ergebnisse an Kimi API für intelligente Analyse.
+    Gibt AI-generierte Empfehlungen und erweiterte Analyse zurück.
+    """
+    key = _get_key()  # IMMER dynamisch lesen!
+    if not key:
+        return []  # Kein API Key → keine AI-Analyse
+    
     try:
         import urllib.request
-
-        # Build rich findings summary for K2
+        
+        # Baute Prompt
         findings_summary = "\n".join([
-            f"[{f['severity'].upper()}] {f['type']}: {f['title']}\n  URL: {f.get('url', 'N/A')}\n  Evidence: {f.get('evidence', 'N/A')[:150]}"
-            for f in findings[:25]
+            f"- [{f['severity'].upper()}] {f['title']} ({f['type']}): {f.get('evidence', 'N/A')[:100]}"
+            for f in findings[:20]  # Max 20 findings
         ])
+        
+        prompt = f"""Du bist ein Senior Security Analyst. Analysiere diese Scan-Ergebnisse für {target} und gib erweiterte, praxisnahe Empfehlungen.
 
-        prompt = f"""Du bist ein CISSP-zertifizierter Senior Security Analyst mit 15 Jahren Erfahrung im Penetration Testing. Fuehre eine Tiefenanalyse der folgenden Scan-Ergebnisse durch.
-
-ZIEL: {target}
-
-SCAN-ERGEBNISSE:
+GEFUNDENE SCHWACHSTELLEN:
 {findings_summary}
 
-ANALYSEANFORDERUNGEN:
-1. Bewerte das Gesamtrisiko (0-100) mit Begruendung
-2. Priorisiere die TOP 5 kritischsten Schwachstellen
-3. Beschreibe konkrete Exploit-Szenarien (Schritt-fuer-Schritt)
-4. Nenne CVSS-Schaetzungen wo moeglich
-5. Empfehle sofortige Gegenmassnahmen
-6. Pruefe auf chained vulnerabilities (Mehrfachausnutzung)
+Erstelle eine detaillierte Analyse mit:
+1. Risiko-Bewertung (0-100 Score)
+2. Top 3 priorisierte Fix-Empfehlungen
+3. Mögliche Angriffsszenarien
+4. Compliance-Auswirkungen (ISO 27001, BSI)
 
-ANTWORTFORMAT - striktes JSON-Array:
-[
-  {{"id": "AI-001", "severity": "critical|high|medium|low|info", "type": "ai_analysis", "title": "Kurztitel", "url": "{target}", "evidence": "Detaillierte Analyse...", "remediation": "Konkrete Fix-Schritte..."}}
-]
-
-WICHTIG: Nur das JSON-Array ausgeben, kein Markdown, keine Erklaerungen davor/danach. AUF DEUTSCH."""
+Formattiere als JSON-Array von findings mit id, severity, type, title, url, evidence, remediation.
+AUF DEUTSCH antworten."""
 
         req_data = json.dumps({
             "model": KIMI_MODEL,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2,
-            "max_tokens": 4000
+            "temperature": 0.3,
+            "max_tokens": 2000
         }).encode('utf-8')
-
+        
         req = urllib.request.Request(
-            KIMI_API_URL,
+            _get_api_url(),
             data=req_data,
             headers={
                 'Content-Type': 'application/json',
-                'Authorization': f'Bearer {api_key}'
+                'Authorization': f'Bearer {key}'
             },
             method='POST'
         )
-
-        resp = urllib.request.urlopen(req, timeout=60)
+        
+        resp = urllib.request.urlopen(req, timeout=30)
         result = json.loads(resp.read().decode('utf-8'))
-
+        
         ai_response = result['choices'][0]['message']['content']
-
-        # Parse JSON array from response
+        
+        # Versuche JSON zu parsen
         try:
+            # Extrahiere JSON aus der Response
             json_start = ai_response.find('[')
             json_end = ai_response.rfind(']') + 1
             if json_start >= 0 and json_end > json_start:
                 ai_findings = json.loads(ai_response[json_start:json_end])
-                # Tag as K2 analysis
-                for f in ai_findings:
-                    f['type'] = 'kimi_k2_analysis'
-                    f['title'] = f"[K2] {f.get('title', 'AI Analysis')}"
                 return ai_findings
-        except Exception as parse_err:
-            print(f"[K2] JSON parse error: {parse_err}")
+        except:
             pass
-
-        # Fallback: structured analysis
+        
+        # Fallback: Erstelle ein Info-Finding mit der AI-Analyse
         return [{
             "id": "AI-001",
             "severity": "info",
-            "type": "kimi_k2_analysis",
-            "title": "[K2] Erweiterte Sicherheitsanalyse",
+            "type": "ai_analysis",
+            "title": "Kimi AI Erweiterte Analyse",
             "url": target,
-            "evidence": ai_response[:800],
-            "remediation": "Siehe detaillierte Analyse oben. Priorisierte Fixes in der Evidence beschrieben."
+            "evidence": ai_response[:500],
+            "remediation": "Detaillierte Analyse von Kimi API"
         }]
-
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode('utf-8', errors='ignore') if hasattr(e, 'read') else ''
-        if e.code == 401:
-            return [{
-                "id": "AI-ERR",
-                "severity": "info",
-                "type": "ai_error",
-                "title": "[K2] API Key ungueltig (401)",
-                "url": target,
-                "evidence": f"Key abgelehnt. Details: {err_body[:300]}",
-                "remediation": "1. Key in Replit Secrets als EINZEILER eintragen (keine Zeilenumbrueche!). 2. Neuen Key von https://platform.moonshot.cn erstellen."
-            }]
-        elif e.code == 429:
-            return [{
-                "id": "AI-ERR",
-                "severity": "info",
-                "type": "ai_error",
-                "title": "[K2] Rate Limit erreicht (429)",
-                "url": target,
-                "evidence": "Zu viele Anfragen. Bitte warten.",
-                "remediation": "Einige Minuten warten und erneut scannen."
-            }]
-        return [{
-            "id": "AI-ERR",
-            "severity": "info",
-            "type": "ai_error",
-            "title": f"[K2] API Fehler {e.code}",
-            "url": target,
-            "evidence": str(e),
-            "remediation": "Spaeter erneut versuchen."
-        }]
+        
     except Exception as e:
         return [{
             "id": "AI-ERR",
-            "severity": "info",
+            "severity": "info", 
             "type": "ai_error",
-            "title": "[K2] Netzwerkfehler",
+            "title": "Kimi API nicht verfügbar",
             "url": target,
             "evidence": str(e),
-            "remediation": "Netzwerkverbindung pruefen."
+            "remediation": "KIMI_API_KEY Umgebungsvariable setzen"
         }]
 
 
 def generate_report(target, findings):
-    """Generate executive summary using Kimi K2"""
-    api_key = _get_key()
-    if not api_key:
+    """Generiere einen menschenlesbaren Bericht mit Kimi"""
+    key = _get_key()
+    if not key:
         return None
-
+    
     try:
         import urllib.request
-
+        
         sev_count = {}
         for f in findings:
             sev_count[f['severity']] = sev_count.get(f['severity'], 0) + 1
+        
+        prompt = f"""Erstelle einen professionellen Security-Scan-Bericht für {target}.
 
-        prompt = f"""Erstelle einen professionellen Security-Scan-Bericht (Executive Summary) fuer {target}.
-
-Statistik:
+Zusammenfassung:
 - Critical: {sev_count.get('critical', 0)}
 - High: {sev_count.get('high', 0)}
 - Medium: {sev_count.get('medium', 0)}
@@ -179,39 +138,38 @@ Statistik:
 - Info: {sev_count.get('info', 0)}
 
 Anforderungen:
-1. Executive Summary (3-4 praezise Saetze auf Deutsch)
-2. Top 3 Risiken mit Business-Impact
-3. Sofortmassnahmen (priorisiert)
-4. Frist fuer Fixes empfehlen
+1. Executive Summary (3-4 Sätze)
+2. Top 3 Risiken
+3. Sofortmassnahmen
 
-Format: Reiner Text, kein Markdown. Max 300 Woerter."""
+AUF DEUTSCH. Max 300 Wörter."""
 
         req_data = json.dumps({
             "model": KIMI_MODEL,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-            "max_tokens": 1500
+            "temperature": 0.4,
+            "max_tokens": 1000
         }).encode('utf-8')
-
+        
         req = urllib.request.Request(
-            KIMI_API_URL,
+            _get_api_url(),
             data=req_data,
             headers={
                 'Content-Type': 'application/json',
-                'Authorization': f'Bearer {api_key}'
+                'Authorization': f'Bearer {key}'
             },
             method='POST'
         )
-
-        resp = urllib.request.urlopen(req, timeout=60)
+        
+        resp = urllib.request.urlopen(req, timeout=30)
         result = json.loads(resp.read().decode('utf-8'))
         return result['choices'][0]['message']['content']
-
+        
     except Exception as e:
-        return f"K2 Berichtsgenerierung fehlgeschlagen: {e}"
+        return f"Berichtsgenerierung fehlgeschlagen: {e}"
 
 
 def check_api_key():
-    """Check if Kimi API key is configured and appears valid"""
+    """Prüfe ob Kimi API Key konfiguriert ist"""
     key = _get_key()
-    return bool(key and len(key) > 20 and key != 'your-api-key-here')
+    return bool(key and key != 'your-api-key-here' and len(key) > 20)

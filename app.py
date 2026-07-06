@@ -168,14 +168,25 @@ def _get_kimi_key():
     return key
 
 
+def _get_kimi_api_url():
+    """Get Kimi API URL - auto-detects based on key format"""
+    key = _get_kimi_key()
+    # kimi.com keys use api.kimi.com, moonshot keys use api.moonshot.cn
+    if key.startswith('sk-kimi-'):
+        return 'https://api.kimi.com/v1/chat/completions'
+    return os.environ.get('KIMI_API_URL', 'https://api.moonshot.cn/v1/chat/completions')
+
+
 @app.route('/api/kimi-test', methods=['GET'])
 def kimi_test():
     api_key = _get_kimi_key()
+    api_url = _get_kimi_api_url()
     diagnostics = {
         'key_present': bool(api_key),
         'key_length': len(api_key),
         'key_prefix': api_key[:10] + '...' if len(api_key) > 10 else 'too_short',
         'key_format_ok': bool(api_key.startswith('sk-') and len(api_key) > 20),
+        'api_url_used': api_url,
     }
     if not api_key:
         diagnostics['status'] = 'no_key'
@@ -189,7 +200,7 @@ def kimi_test():
             "max_tokens": 10
         }).encode('utf-8')
         req = urllib.request.Request(
-            "https://api.moonshot.cn/v1/chat/completions",
+            api_url,
             data=req_data,
             headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'},
             method='POST')
@@ -203,7 +214,7 @@ def kimi_test():
         diagnostics['status'] = f'http_error_{e.code}'
         diagnostics['error_details'] = err
         if e.code == 401:
-            diagnostics['message'] = 'Key ungueltig (401)! Pruefe ob der Key aktiv ist auf platform.moonshot.cn'
+            diagnostics['message'] = 'Key ungueltig (401)! Pruefe ob der Key aktiv ist.'
         elif e.code == 429:
             diagnostics['message'] = 'Rate Limit (429)! Zu viele Anfragen.'
         elif e.code == 403:
@@ -218,7 +229,7 @@ def kimi_test():
 
 @app.route('/api/kimi-debug', methods=['GET'])
 def kimi_debug():
-    """Advanced debug endpoint - tests multiple models and shows key info"""
+    """Advanced debug endpoint - tests multiple API URLs and models"""
     raw_key = os.environ.get('KIMI_API_KEY', '')
     clean_key = _get_kimi_key()
     
@@ -236,43 +247,52 @@ def kimi_debug():
             'clean_prefix': clean_key[:15] if clean_key else 'EMPTY',
             'first_10_chars': key_chars,
             'starts_with_sk': clean_key.startswith('sk-'),
+            'starts_with_sk_kimi': clean_key.startswith('sk-kimi-'),
         },
-        'model_tests': {}
+        'api_tests': {}
     }
     
     if not clean_key:
-        result['model_tests'] = {'error': 'No key found after cleaning'}
+        result['api_tests'] = {'error': 'No key found after cleaning'}
         return jsonify(result)
     
-    # Test both models
-    for model_name in ['kimi-k2-0711-preview', 'kimi-latest']:
+    # Test BOTH API endpoints
+    api_urls_to_test = [
+        ('api.moonshot.cn', 'https://api.moonshot.cn/v1/chat/completions'),
+        ('api.kimi.com', 'https://api.kimi.com/v1/chat/completions'),
+    ]
+    
+    for api_name, api_url in api_urls_to_test:
         try:
             import urllib.request
             req_data = json.dumps({
-                "model": model_name,
+                "model": "kimi-k2-0711-preview",
                 "messages": [{"role": "user", "content": "Say OK"}],
                 "max_tokens": 10
             }).encode('utf-8')
             req = urllib.request.Request(
-                "https://api.moonshot.cn/v1/chat/completions",
+                api_url,
                 data=req_data,
                 headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {clean_key}'},
                 method='POST')
             resp = urllib.request.urlopen(req, timeout=15)
             resp_json = json.loads(resp.read().decode('utf-8'))
-            result['model_tests'][model_name] = {
+            result['api_tests'][api_name] = {
                 'status': 'success',
+                'url': api_url,
                 'response': resp_json['choices'][0]['message']['content'][:50] if resp_json.get('choices') else 'no content'
             }
         except urllib.error.HTTPError as e:
             err_body = e.read().decode('utf-8', errors='ignore')[:500] if hasattr(e, 'read') else ''
-            result['model_tests'][model_name] = {
+            result['api_tests'][api_name] = {
                 'status': f'error_{e.code}',
+                'url': api_url,
                 'error_body': err_body
             }
         except Exception as e:
-            result['model_tests'][model_name] = {
+            result['api_tests'][api_name] = {
                 'status': 'exception',
+                'url': api_url,
                 'error': str(e)
             }
     
