@@ -1,7 +1,8 @@
 """
-Security Scanner Backend v3.2 - Main Flask Application
-Orchestrates 20 security scanning modules with real HTTP requests
+Security Scanner Backend v3.3 - Main Flask Application
+Orchestrates 24 security scanning modules with real HTTP requests
 + Kimi K2-0711-preview AI analysis + Blind SQLi PoC Detector
++ WPScan, Nuclei, Nikto, SQLMap, Gobuster, FFUF, HTTPX, CVE
 """
 import os
 import sys
@@ -19,7 +20,6 @@ app = Flask(__name__)
 # ============== CORS - Manual (covers ALL routes) ==============
 @app.after_request
 def after_request(response):
-    """Add CORS headers to every single response"""
     response.headers.add('Access-Control-Allow-Origin', '*')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
     response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
@@ -34,7 +34,6 @@ def after_request(response):
 @app.route('/api/kimi-test', methods=['OPTIONS'])
 @app.route('/api/scan/<path:path>', methods=['OPTIONS'])
 def handle_options(path=None):
-    """Handle all OPTIONS preflight requests"""
     response = make_response()
     response.headers.add('Access-Control-Allow-Origin', '*')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
@@ -43,10 +42,9 @@ def handle_options(path=None):
     response.headers.add('Access-Control-Max-Age', '86400')
     return response, 204
 
-# Add modules directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'modules'))
 
-# Module import definitions: (name, module_name, description)
+# ============== 24 SCANNER MODULES ==============
 MODULE_DEFINITIONS = [
     ('dns', 'dns_scanner', 'DNS-Analyse: Records, SPF, DMARC, DNSSEC'),
     ('ssl', 'ssl_scanner', 'SSL/TLS-Analyse: Zertifikat, Cipher-Suites, HSTS'),
@@ -54,24 +52,29 @@ MODULE_DEFINITIONS = [
     ('xss', 'xss_scanner', 'XSS-Scan: Reflektierte Payloads, DOM-Sinks'),
     ('redirect', 'redirect_scanner', 'Open-Redirect: Parameter-Tests, JS-Redirects'),
     ('methods', 'method_scanner', 'HTTP-Methoden: OPTIONS, PUT, DELETE, TRACE'),
-    ('directory', 'dir_scanner', 'Verzeichnis-Scan: 200+ Pfade, Backups, Configs'),
+    ('directory', 'dir_scanner', 'Verzeichnis-Scan: 989 Pfade, Backups, Configs'),
     ('tech', 'tech_scanner', 'Technologie-Erkennung: Frameworks, Bibliotheken'),
     ('cookies', 'cookie_scanner', 'Cookie-Analyse: Secure, HttpOnly, SameSite'),
     ('cors', 'cors_scanner', 'CORS-Scan: Origin-Reflection, Wildcards'),
-    ('subdomain', 'subdomain_scanner', 'Subdomain-Enumeration: 100 Subdomains'),
+    ('subdomain', 'subdomain_scanner', 'Subdomain-Enumeration: 1780 Subdomains'),
     ('ports', 'port_scanner', 'Port-Scan: 22 Ports + Banner-Grabbing'),
     ('whois', 'whois_scanner', 'WHOIS-Abfrage: Registrar, Ablaufdatum'),
     ('content', 'content_scanner', 'Content-Scan: robots.txt, sitemap, 404'),
     ('injection', 'injection_scanner', 'Injection-Tests: SQLi, CMDi, NoSQLi, SSTI'),
     ('sqli_poc', 'blind_sqli_detector', 'SQLi PoC: Boolean/Time/Union/Error Beweise'),
-    # Go tools (with Python fallbacks)
-    ('gobuster', 'gobuster_scanner', 'Gobuster: Verzeichnis-Brute-Force (500+ Pfade)'),
+    # NEW: Advanced scanners
+    ('wpscan', 'wpscan_scanner', 'WPScan: WordPress Version, Plugins, Themes, Users'),
+    ('nuclei', 'nuclei_scanner', 'Nuclei: CVE-Signaturen, Template-Matching'),
+    ('nikto', 'nikto_scanner', 'Nikto: Gefaerliche Pfade, Server-Config, Headers'),
+    ('sqlmap', 'sqlmap_scanner', 'SQLMap: Fortgeschrittene SQL-Injection-Detection'),
+    # Go tools with Python fallbacks
+    ('gobuster', 'gobuster_scanner', 'Gobuster: Verzeichnis-Brute-Force'),
     ('ffuf', 'ffuf_scanner', 'FFUF: Parameter-Fuzzing + Virtual-Host-Discovery'),
     ('httpx', 'httpx_scanner', 'HTTPX: HTTP-Fingerprinting + WAF/CDN-Erkennung'),
     ('cve', 'cve_scanner', 'CVE-Scanner: Bekannte Schwachstellen pro Technologie'),
 ]
 
-# Robust module loading - each module gets its own try/except
+# Robust module loading
 SCANNER_MODULES = []
 MODULE_LOAD_ERRORS = {}
 
@@ -84,7 +87,7 @@ for mod_name, mod_file, mod_desc in MODULE_DEFINITIONS:
         MODULE_LOAD_ERRORS[mod_name] = str(e)
         print(f"[WARN] Skipped module {mod_name}: {e}")
 
-# Load kimi analyzer separately (optional - no API key needed for basic function)
+# Kimi analyzer
 kimi_analyzer = None
 try:
     kimi_analyzer = importlib.import_module('modules.kimi_analyzer')
@@ -99,55 +102,33 @@ if MODULE_LOAD_ERRORS:
 
 
 def run_scanner(module_name, module, target):
-    """Run a single scanner module with error handling"""
     try:
         findings = module.scan(target)
-        return {
-            'module': module_name,
-            'status': 'completed',
-            'findings': findings if findings else []
-        }
+        return {'module': module_name, 'status': 'completed', 'findings': findings if findings else []}
     except Exception as e:
-        traceback_str = traceback.format_exc()
         print(f"[ERROR] Module {module_name} failed: {str(e)}")
-        return {
-            'module': module_name,
-            'status': 'error',
-            'findings': [{
-                'id': f'{module_name}-error',
-                'severity': 'info',
-                'type': 'scan_error',
-                'title': f'Scanner-Modul {module_name} fehlgeschlagen',
-                'url': target,
-                'evidence': f'Fehler: {str(e)}',
-                'remediation': 'Scan-Ergebnis manuell pruefen.'
-            }]
-        }
+        return {'module': module_name, 'status': 'error', 'findings': [{
+            'id': f'{module_name}-error', 'severity': 'info', 'type': 'scan_error',
+            'title': f'Scanner-Modul {module_name} fehlgeschlagen', 'url': target,
+            'evidence': f'Fehler: {str(e)}', 'remediation': 'Scan manuell pruefen.'
+        }]}
 
 
 def severity_score(severity):
-    """Convert severity to numeric score for sorting"""
-    scores = {
-        'critical': 5,
-        'high': 4,
-        'medium': 3,
-        'low': 2,
-        'info': 1,
-    }
+    scores = {'critical': 5, 'high': 4, 'medium': 3, 'low': 2, 'info': 1}
     return scores.get(severity.lower(), 0)
 
 
 @app.route('/')
 def index():
-    """Root endpoint with API info"""
     return jsonify({
         'name': 'Security Scanner Backend',
-        'version': '3.2.0',
-        'description': 'Comprehensive security scanning with 20 modules + Kimi K2 AI + Blind SQLi PoC',
+        'version': '3.3.0',
+        'description': 'Comprehensive security scanning with 24 modules + Kimi K2 AI',
         'endpoints': {
-            '/api/scan': 'POST - Start a security scan (JSON body: {"target": "example.com"})',
-            '/api/modules': 'GET - List all available scanner modules',
-            '/api/kimi-test': 'GET - Test Kimi API key configuration',
+            '/api/scan': 'POST - Start a security scan',
+            '/api/modules': 'GET - List all modules',
+            '/api/kimi-test': 'GET - Test Kimi API key',
             '/health': 'GET - Health check'
         },
         'modules_loaded': len(SCANNER_MODULES),
@@ -159,7 +140,6 @@ def index():
 
 @app.route('/health')
 def health():
-    """Health check endpoint - ALWAYS returns 200"""
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.utcnow().isoformat(),
@@ -170,43 +150,24 @@ def health():
 
 @app.route('/api/modules', methods=['GET'])
 def list_modules():
-    """List all available scanner modules"""
     return jsonify({
-        'modules': [
-            {
-                'name': name,
-                'description': desc,
-            }
-            for name, _, desc in SCANNER_MODULES
-        ],
+        'modules': [{'name': name, 'description': desc} for name, _, desc in SCANNER_MODULES],
         'errors': MODULE_LOAD_ERRORS
     })
 
 
 @app.route('/api/kimi-test', methods=['GET'])
 def kimi_test():
-    """Test Kimi API key - returns detailed diagnostics"""
     api_key = os.environ.get('KIMI_API_KEY', '').strip()
-    
     diagnostics = {
         'key_present': bool(api_key),
         'key_length': len(api_key),
-        'key_prefix': api_key[:7] + '...' if len(api_key) > 10 else 'too_short',
-        'key_valid_format': bool(api_key and len(api_key) > 20 and api_key.startswith('sk-')),
-        'kimi_module_loaded': kimi_analyzer is not None,
+        'key_prefix': api_key[:10] + '...' if len(api_key) > 10 else 'too_short',
     }
-    
     if not api_key:
         diagnostics['status'] = 'no_key'
-        diagnostics['message'] = 'KIMI_API_KEY nicht gesetzt. In Replit Secrets hinzufuegen!'
+        diagnostics['message'] = 'KIMI_API_KEY nicht gesetzt!'
         return jsonify(diagnostics)
-    
-    if len(api_key) < 20:
-        diagnostics['status'] = 'key_too_short'
-        diagnostics['message'] = 'Key zu kurz - pruefe ob komplett kopiert!'
-        return jsonify(diagnostics)
-    
-    # Try actual API call
     try:
         import urllib.request
         req_data = json.dumps({
@@ -214,81 +175,55 @@ def kimi_test():
             "messages": [{"role": "user", "content": "Say OK"}],
             "max_tokens": 10
         }).encode('utf-8')
-        
         req = urllib.request.Request(
             "https://api.moonshot.cn/v1/chat/completions",
             data=req_data,
-            headers={
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {api_key}'
-            },
-            method='POST'
-        )
-        
+            headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'},
+            method='POST')
         resp = urllib.request.urlopen(req, timeout=15)
         result = json.loads(resp.read().decode('utf-8'))
-        
         diagnostics['status'] = 'success'
-        diagnostics['message'] = 'Kimi K2 API Key funktioniert!'
-        diagnostics['model_response'] = result['choices'][0]['message']['content'][:50]
+        diagnostics['message'] = 'Kimi K2 funktioniert!'
         diagnostics['credits_used'] = True
-        
     except urllib.error.HTTPError as e:
-        err_body = e.read().decode('utf-8', errors='ignore') if hasattr(e, 'read') else ''
+        err = e.read().decode('utf-8', errors='ignore')[:200] if hasattr(e, 'read') else ''
         diagnostics['status'] = f'http_error_{e.code}'
         if e.code == 401:
-            diagnostics['message'] = 'Key ungueltig (401) - Neuer Key von platform.moonshot.cn noetig!'
+            diagnostics['message'] = 'Key ungueltig! Neuen Key von platform.moonshot.cn!'
         elif e.code == 429:
-            diagnostics['message'] = 'Rate limit (429) - Zu viele Anfragen, spaeter versuchen!'
+            diagnostics['message'] = 'Rate Limit! Spaeter erneut versuchen!'
         elif e.code == 403:
-            diagnostics['message'] = 'Forbidden (403) - Key hat keinen Zugriff auf K2-Modell!'
+            diagnostics['message'] = 'Kein K2-Zugriff! Anderen Key verwenden!'
         else:
-            diagnostics['message'] = f'API Fehler: HTTP {e.code} - {err_body[:200]}'
-        diagnostics['error_details'] = err_body[:500]
-        
+            diagnostics['message'] = f'Fehler {e.code}: {err}'
     except Exception as e:
         diagnostics['status'] = 'network_error'
-        diagnostics['message'] = f'Netzwerkfehler: {str(e)}'
-    
+        diagnostics['message'] = str(e)
     return jsonify(diagnostics)
 
 
 @app.route('/api/scan', methods=['POST'])
 def scan():
-    """Main scan endpoint - runs all scanner modules"""
     data = request.get_json(silent=True) or {}
     target = data.get('target', '').strip()
 
     if not target:
-        return jsonify({
-            'error': 'Target is required',
-            'message': 'Please provide a target URL or hostname in the JSON body: {"target": "example.com"}'
-        }), 400
+        return jsonify({'error': 'Target is required', 'message': 'Provide {"target": "example.com"}'}), 400
 
-    # Clean target
     target = target.replace('http://', '').replace('https://', '').split('/')[0].split(':')[0]
 
     # Allow specific modules to be selected
     selected_modules = data.get('modules', [])
     if selected_modules:
-        modules_to_run = [
-            (name, mod, desc)
-            for name, mod, desc in SCANNER_MODULES
-            if name in selected_modules
-        ]
+        modules_to_run = [(name, mod, desc) for name, mod, desc in SCANNER_MODULES if name in selected_modules]
     else:
-        modules_to_run = SCANNER_MODULES
+        modules_to_run = SCANNER_MODULES  # ALL modules run by default
 
     if not modules_to_run:
-        return jsonify({
-            'error': 'No modules available',
-            'message': 'No scanner modules could be loaded. Check server logs.',
-            'module_errors': MODULE_LOAD_ERRORS
-        }), 500
+        return jsonify({'error': 'No modules available'}), 500
 
     print(f"\n{'='*60}")
-    print(f"[SCAN START] Target: {target}")
-    print(f"[SCAN START] Modules: {len(modules_to_run)}")
+    print(f"[SCAN START] Target: {target} | Modules: {len(modules_to_run)}")
     print(f"{'='*60}\n")
 
     start_time = time.time()
@@ -296,8 +231,7 @@ def scan():
     all_findings = []
     phase_log = []
 
-    # Run scanners in parallel with thread pool
-    with ThreadPoolExecutor(max_workers=min(len(modules_to_run), 10)) as executor:
+    with ThreadPoolExecutor(max_workers=min(len(modules_to_run), 12)) as executor:
         future_to_module = {
             executor.submit(run_scanner, name, mod, target): (name, desc)
             for name, mod, desc in modules_to_run
@@ -306,69 +240,35 @@ def scan():
         for i, future in enumerate(as_completed(future_to_module), 1):
             name, desc = future_to_module[future]
             try:
-                result = future.result(timeout=90)
+                result = future.result(timeout=120)
                 all_results[name] = result
                 if result['findings']:
                     all_findings.extend(result['findings'])
-
-                phase_entry = {
-                    'phase': i,
-                    'module': name,
-                    'description': desc,
-                    'status': result['status'],
-                    'findings_count': len(result['findings'])
-                }
-                phase_log.append(phase_entry)
-                print(f"[PHASE {i}] {name}: {desc} - {result['status']} ({len(result['findings'])} findings)")
-
+                phase_log.append({'phase': i, 'module': name, 'description': desc,
+                                  'status': result['status'], 'findings_count': len(result['findings'])})
+                print(f"[PHASE {i}] {name}: {result['status']} ({len(result['findings'])} findings)")
             except Exception as e:
-                phase_entry = {
-                    'phase': i,
-                    'module': name,
-                    'description': desc,
-                    'status': 'timeout',
-                    'findings_count': 0,
-                    'error': str(e)
-                }
-                phase_log.append(phase_entry)
+                phase_log.append({'phase': i, 'module': name, 'description': desc,
+                                  'status': 'timeout', 'findings_count': 0, 'error': str(e)})
                 print(f"[PHASE {i}] {name}: TIMEOUT - {str(e)}")
 
     elapsed = time.time() - start_time
 
-    # Sort findings by severity
+    # Sort findings
     all_findings.sort(key=lambda f: severity_score(f.get('severity', 'info')), reverse=True)
 
-    # Calculate statistics
+    # Statistics
     severity_counts = {}
-    type_counts = {}
     for f in all_findings:
         sev = f.get('severity', 'info')
-        typ = f.get('type', 'unknown')
         severity_counts[sev] = severity_counts.get(sev, 0) + 1
-        type_counts[typ] = type_counts.get(typ, 0) + 1
 
-    # Risk score calculation
-    risk_score = (
-        severity_counts.get('critical', 0) * 20 +
-        severity_counts.get('high', 0) * 10 +
-        severity_counts.get('medium', 0) * 5 +
-        severity_counts.get('low', 0) * 2
-    )
-    risk_score = min(risk_score, 100)
+    risk_score = min(severity_counts.get('critical', 0) * 20 + severity_counts.get('high', 0) * 10 +
+                     severity_counts.get('medium', 0) * 5 + severity_counts.get('low', 0) * 2, 100)
 
-    # Risk level
-    if risk_score >= 70:
-        risk_level = 'critical'
-    elif risk_score >= 40:
-        risk_level = 'high'
-    elif risk_score >= 20:
-        risk_level = 'medium'
-    elif risk_score >= 5:
-        risk_level = 'low'
-    else:
-        risk_level = 'info'
+    risk_level = 'critical' if risk_score >= 70 else 'high' if risk_score >= 40 else 'medium' if risk_score >= 20 else 'low' if risk_score >= 5 else 'info'
 
-    # Kimi K2 AI Analysis (if available and API key is configured)
+    # Kimi K2 AI Analysis
     ai_findings = []
     ai_report = None
     ai_enabled = False
@@ -378,25 +278,19 @@ def scan():
         except:
             ai_enabled = False
         if ai_enabled and all_findings:
-            print("[KIMI K2] Starting deep security analysis...")
+            print("[KIMI K2] Starting deep analysis...")
             try:
                 ai_findings = kimi_analyzer.analyze_with_kimi(target, all_findings)
                 ai_report = kimi_analyzer.generate_report(target, all_findings)
                 all_findings.extend(ai_findings)
-                print(f"[KIMI K2] Analysis complete: {len(ai_findings)} AI findings")
+                print(f"[KIMI K2] Analysis complete: {len(ai_findings)} findings")
             except Exception as e:
                 print(f"[KIMI K2] Error: {e}")
 
-    print(f"\n{'='*60}")
-    print(f"[SCAN COMPLETE] Target: {target}")
-    print(f"[SCAN COMPLETE] Duration: {elapsed:.1f}s")
-    print(f"[SCAN COMPLETE] Total findings: {len(all_findings)}")
-    print(f"[SCAN COMPLETE] Risk score: {risk_score}/100 ({risk_level})")
-    if ai_report:
-        print(f"[SCAN COMPLETE] Kimi K2 Analysis: YES")
+    print(f"\n[SCAN COMPLETE] {target} | {elapsed:.1f}s | {len(all_findings)} findings | Risk: {risk_score}/100")
     print(f"{'='*60}\n")
 
-    response = {
+    return jsonify({
         'target': target,
         'scan_time': datetime.utcnow().isoformat(),
         'duration_seconds': round(elapsed, 2),
@@ -408,7 +302,6 @@ def scan():
         'summary': {
             'total_findings': len(all_findings),
             'severity_breakdown': severity_counts,
-            'top_findings_types': dict(sorted(type_counts.items(), key=lambda x: x[1], reverse=True)[:10])
         },
         'phases': phase_log,
         'ai_analysis': {
@@ -418,72 +311,47 @@ def scan():
             'executive_summary': ai_report
         },
         'findings': all_findings,
-        'modules': {name: {
-            'status': res['status'],
-            'findings_count': len(res['findings'])
-        } for name, res in all_results.items()}
-    }
-
-    return jsonify(response)
+        'modules': {name: {'status': res['status'], 'findings_count': len(res['findings'])}
+                    for name, res in all_results.items()}
+    })
 
 
 @app.route('/api/scan/<module>', methods=['POST'])
 def scan_single(module):
-    """Run a single scanner module"""
     data = request.get_json(silent=True) or {}
     target = data.get('target', '').strip()
-
     if not target:
         return jsonify({'error': 'Target is required'}), 400
-
     target = target.replace('http://', '').replace('https://', '').split('/')[0].split(':')[0]
 
-    # Find module
     module_map = {name: (mod, desc) for name, mod, desc in SCANNER_MODULES}
     if module not in module_map:
-        return jsonify({
-            'error': f'Unknown module: {module}',
-            'available_modules': list(module_map.keys())
-        }), 404
+        return jsonify({'error': f'Unknown module: {module}', 'available': list(module_map.keys())}), 404
 
     mod, desc = module_map[module]
-    print(f"[SINGLE SCAN] {module}: {desc} - Target: {target}")
-
-    start_time = time.time()
     result = run_scanner(module, mod, target)
-    elapsed = time.time() - start_time
-
-    # Sort findings
-    result['findings'].sort(
-        key=lambda f: severity_score(f.get('severity', 'info')),
-        reverse=True
-    )
+    result['findings'].sort(key=lambda f: severity_score(f.get('severity', 'info')), reverse=True)
 
     return jsonify({
-        'target': target,
-        'module': module,
-        'description': desc,
+        'target': target, 'module': module, 'description': desc,
         'scan_time': datetime.utcnow().isoformat(),
-        'duration_seconds': round(elapsed, 2),
-        'status': result['status'],
-        'findings_count': len(result['findings']),
+        'status': result['status'], 'findings_count': len(result['findings']),
         'findings': result['findings']
     })
 
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({'error': 'Endpoint not found', 'available': ['/api/scan', '/api/modules', '/api/kimi-test', '/health']}), 404
+    return jsonify({'error': 'Not found', 'available': ['/api/scan', '/api/modules', '/api/kimi-test', '/health']}), 404
 
 
 @app.errorhandler(500)
 def server_error(error):
-    return jsonify({'error': 'Internal server error', 'message': str(error)}), 500
+    return jsonify({'error': 'Internal error', 'message': str(error)}), 500
 
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    debug = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
-    print(f"Starting Security Scanner Backend v3.2 on port {port}")
-    print(f"Modules loaded: {len(SCANNER_MODULES)}")
-    app.run(host='0.0.0.0', port=port, debug=debug)
+    print(f"Starting Security Scanner Backend v3.3 on port {port}")
+    print(f"Modules: {len(SCANNER_MODULES)}/{len(MODULE_DEFINITIONS)}")
+    app.run(host='0.0.0.0', port=port)
