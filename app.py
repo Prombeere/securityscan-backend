@@ -1,7 +1,7 @@
 """
-Security Scanner Backend v3.0 - Main Flask Application
-Orchestrates 19 security scanning modules with real HTTP requests
-+ Kimi K2-0711-preview AI analysis
+Security Scanner Backend v3.2 - Main Flask Application
+Orchestrates 20 security scanning modules with real HTTP requests
++ Kimi K2-0711-preview AI analysis + Blind SQLi PoC Detector
 """
 import os
 import sys
@@ -31,6 +31,7 @@ def after_request(response):
 @app.route('/health', methods=['OPTIONS'])
 @app.route('/api/scan', methods=['OPTIONS'])
 @app.route('/api/modules', methods=['OPTIONS'])
+@app.route('/api/kimi-test', methods=['OPTIONS'])
 @app.route('/api/scan/<path:path>', methods=['OPTIONS'])
 def handle_options(path=None):
     """Handle all OPTIONS preflight requests"""
@@ -62,6 +63,7 @@ MODULE_DEFINITIONS = [
     ('whois', 'whois_scanner', 'WHOIS-Abfrage: Registrar, Ablaufdatum'),
     ('content', 'content_scanner', 'Content-Scan: robots.txt, sitemap, 404'),
     ('injection', 'injection_scanner', 'Injection-Tests: SQLi, CMDi, NoSQLi, SSTI'),
+    ('sqli_poc', 'blind_sqli_detector', 'SQLi PoC: Boolean/Time/Union/Error Beweise'),
     # Go tools (with Python fallbacks)
     ('gobuster', 'gobuster_scanner', 'Gobuster: Verzeichnis-Brute-Force (500+ Pfade)'),
     ('ffuf', 'ffuf_scanner', 'FFUF: Parameter-Fuzzing + Virtual-Host-Discovery'),
@@ -140,11 +142,12 @@ def index():
     """Root endpoint with API info"""
     return jsonify({
         'name': 'Security Scanner Backend',
-        'version': '3.0.0',
-        'description': 'Comprehensive security scanning with 19 modules + Kimi K2 AI',
+        'version': '3.2.0',
+        'description': 'Comprehensive security scanning with 20 modules + Kimi K2 AI + Blind SQLi PoC',
         'endpoints': {
             '/api/scan': 'POST - Start a security scan (JSON body: {"target": "example.com"})',
             '/api/modules': 'GET - List all available scanner modules',
+            '/api/kimi-test': 'GET - Test Kimi API key configuration',
             '/health': 'GET - Health check'
         },
         'modules_loaded': len(SCANNER_MODULES),
@@ -178,6 +181,76 @@ def list_modules():
         ],
         'errors': MODULE_LOAD_ERRORS
     })
+
+
+@app.route('/api/kimi-test', methods=['GET'])
+def kimi_test():
+    """Test Kimi API key - returns detailed diagnostics"""
+    api_key = os.environ.get('KIMI_API_KEY', '').strip()
+    
+    diagnostics = {
+        'key_present': bool(api_key),
+        'key_length': len(api_key),
+        'key_prefix': api_key[:7] + '...' if len(api_key) > 10 else 'too_short',
+        'key_valid_format': bool(api_key and len(api_key) > 20 and api_key.startswith('sk-')),
+        'kimi_module_loaded': kimi_analyzer is not None,
+    }
+    
+    if not api_key:
+        diagnostics['status'] = 'no_key'
+        diagnostics['message'] = 'KIMI_API_KEY nicht gesetzt. In Replit Secrets hinzufuegen!'
+        return jsonify(diagnostics)
+    
+    if len(api_key) < 20:
+        diagnostics['status'] = 'key_too_short'
+        diagnostics['message'] = 'Key zu kurz - pruefe ob komplett kopiert!'
+        return jsonify(diagnostics)
+    
+    # Try actual API call
+    try:
+        import urllib.request
+        req_data = json.dumps({
+            "model": "kimi-k2-0711-preview",
+            "messages": [{"role": "user", "content": "Say OK"}],
+            "max_tokens": 10
+        }).encode('utf-8')
+        
+        req = urllib.request.Request(
+            "https://api.moonshot.cn/v1/chat/completions",
+            data=req_data,
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {api_key}'
+            },
+            method='POST'
+        )
+        
+        resp = urllib.request.urlopen(req, timeout=15)
+        result = json.loads(resp.read().decode('utf-8'))
+        
+        diagnostics['status'] = 'success'
+        diagnostics['message'] = 'Kimi K2 API Key funktioniert!'
+        diagnostics['model_response'] = result['choices'][0]['message']['content'][:50]
+        diagnostics['credits_used'] = True
+        
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode('utf-8', errors='ignore') if hasattr(e, 'read') else ''
+        diagnostics['status'] = f'http_error_{e.code}'
+        if e.code == 401:
+            diagnostics['message'] = 'Key ungueltig (401) - Neuer Key von platform.moonshot.cn noetig!'
+        elif e.code == 429:
+            diagnostics['message'] = 'Rate limit (429) - Zu viele Anfragen, spaeter versuchen!'
+        elif e.code == 403:
+            diagnostics['message'] = 'Forbidden (403) - Key hat keinen Zugriff auf K2-Modell!'
+        else:
+            diagnostics['message'] = f'API Fehler: HTTP {e.code} - {err_body[:200]}'
+        diagnostics['error_details'] = err_body[:500]
+        
+    except Exception as e:
+        diagnostics['status'] = 'network_error'
+        diagnostics['message'] = f'Netzwerkfehler: {str(e)}'
+    
+    return jsonify(diagnostics)
 
 
 @app.route('/api/scan', methods=['POST'])
@@ -400,7 +473,7 @@ def scan_single(module):
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({'error': 'Endpoint not found', 'available': ['/api/scan', '/api/modules', '/health']}), 404
+    return jsonify({'error': 'Endpoint not found', 'available': ['/api/scan', '/api/modules', '/api/kimi-test', '/health']}), 404
 
 
 @app.errorhandler(500)
@@ -411,6 +484,6 @@ def server_error(error):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
-    print(f"Starting Security Scanner Backend v3.0 on port {port}")
+    print(f"Starting Security Scanner Backend v3.2 on port {port}")
     print(f"Modules loaded: {len(SCANNER_MODULES)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
