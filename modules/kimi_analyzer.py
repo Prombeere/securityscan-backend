@@ -2,11 +2,14 @@
 """
 KIMI API INTEGRATION - Intelligente Analyse mit Moonshot AI
 Nutzt die Kimi API für Advanced Analysis der Scan-Ergebnisse
+Unterstützt sowohl moonshot.cn als auch kimi.com Code API
 """
 
 import json, os
 
-# Kimi API Configuration - Key wird DYNAMISCH gelesen (nicht beim Import!)
+KIMI_API_KEY = _get_key()  # Initialer Wert
+
+
 def _get_key():
     """Lies API Key dynamisch - entfernt alle Newlines/Spaces/Quotes"""
     key = os.environ.get('KIMI_API_KEY', '')
@@ -15,16 +18,23 @@ def _get_key():
     key = key.strip().strip('"').strip("'")
     return key
 
-KIMI_API_KEY = _get_key()  # Initialer Wert
-KIMI_MODEL = "kimi-k2-0711-preview"
-
 
 def _get_api_url():
-    """Auto-detect API URL - kimi.com keys use api.kimi.com"""
+    """Auto-detect API URL - kimi.com Code keys need /coding/v1/ path"""
     key = _get_key()
     if key.startswith('sk-kimi-'):
-        return 'https://api.kimi.com/v1/chat/completions'
+        # CRITICAL: kimi.com Code API uses /coding/v1/ path!
+        # Docs: https://www.kimi.com/code/docs/#api-%E6%8E%A5%E5%85%A5
+        return 'https://api.kimi.com/coding/v1/chat/completions'
     return os.environ.get('KIMI_API_URL', 'https://api.moonshot.cn/v1/chat/completions')
+
+
+def _get_model():
+    """Auto-detect model - kimi.com Code uses 'kimi-for-coding'"""
+    key = _get_key()
+    if key.startswith('sk-kimi-'):
+        return 'kimi-for-coding'
+    return 'kimi-k2-0711-preview'
 
 
 def analyze_with_kimi(target, findings):
@@ -60,7 +70,7 @@ Formattiere als JSON-Array von findings mit id, severity, type, title, url, evid
 AUF DEUTSCH antworten."""
 
         req_data = json.dumps({
-            "model": KIMI_MODEL,
+            "model": _get_model(),
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
             "max_tokens": 2000
@@ -145,7 +155,7 @@ Anforderungen:
 AUF DEUTSCH. Max 300 Wörter."""
 
         req_data = json.dumps({
-            "model": KIMI_MODEL,
+            "model": _get_model(),
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.4,
             "max_tokens": 1000

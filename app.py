@@ -155,22 +155,35 @@ def _get_kimi_key():
 
 
 def _get_kimi_api_url():
-    """Auto-detect API URL based on key format"""
+    """Get Kimi API URL - auto-detects based on key format"""
     key = _get_kimi_key()
+    # CRITICAL: kimi.com Code keys need /coding/v1/ path!
+    # Docs: https://www.kimi.com/code/docs/#api-%E6%8E%A5%E5%85%A5
     if key.startswith('sk-kimi-'):
-        return 'https://api.kimi.com/v1/chat/completions'
+        return 'https://api.kimi.com/coding/v1/chat/completions'
     return os.environ.get('KIMI_API_URL', 'https://api.moonshot.cn/v1/chat/completions')
+
+
+def _get_kimi_model():
+    """Get correct model name based on key format"""
+    key = _get_kimi_key()
+    # kimi.com Code API uses 'kimi-for-coding' as model ID
+    if key.startswith('sk-kimi-'):
+        return 'kimi-for-coding'
+    return 'kimi-k2-0711-preview'
 
 
 @app.route('/api/kimi-test', methods=['GET'])
 def kimi_test():
     api_key = _get_kimi_key()
     api_url = _get_kimi_api_url()
+    model = _get_kimi_model()
     diagnostics = {
         'key_present': bool(api_key),
         'key_length': len(api_key),
         'key_prefix': api_key[:10] + '...' if len(api_key) > 10 else 'too_short',
         'api_url_used': api_url,
+        'model_used': model,
     }
     if not api_key:
         diagnostics['status'] = 'no_key'
@@ -179,7 +192,7 @@ def kimi_test():
     try:
         import urllib.request
         req_data = json.dumps({
-            "model": "kimi-k2-0711-preview",
+            "model": model,
             "messages": [{"role": "user", "content": "Say OK"}],
             "max_tokens": 10
         }).encode('utf-8')
@@ -213,7 +226,7 @@ def kimi_test():
 
 @app.route('/api/kimi-debug', methods=['GET'])
 def kimi_debug():
-    """Advanced debug - tests BOTH APIs with full error details"""
+    """Advanced debug - tests ALL API endpoint combinations"""
     raw_key = os.environ.get('KIMI_API_KEY', '')
     clean_key = _get_kimi_key()
     
@@ -229,6 +242,7 @@ def kimi_debug():
             'first_10_chars': key_chars,
             'starts_with_sk_kimi': clean_key.startswith('sk-kimi-'),
             'detected_api_url': _get_kimi_api_url(),
+            'detected_model': _get_kimi_model(),
         },
         'api_tests': {}
     }
@@ -237,16 +251,18 @@ def kimi_debug():
         result['api_tests'] = {'error': 'No key found after cleaning'}
         return jsonify(result)
     
+    # Test ALL API endpoint combinations
     api_urls_to_test = [
-        ('api.moonshot.cn', 'https://api.moonshot.cn/v1/chat/completions'),
-        ('api.kimi.com', 'https://api.kimi.com/v1/chat/completions'),
+        ('api.moonshot.cn', 'https://api.moonshot.cn/v1/chat/completions', 'kimi-k2-0711-preview'),
+        ('api.kimi.com (WRONG path)', 'https://api.kimi.com/v1/chat/completions', 'kimi-k2-0711-preview'),
+        ('api.kimi.com/coding (CORRECT)', 'https://api.kimi.com/coding/v1/chat/completions', 'kimi-for-coding'),
     ]
     
-    for api_name, api_url in api_urls_to_test:
+    for api_name, api_url, model in api_urls_to_test:
         try:
             import urllib.request
             req_data = json.dumps({
-                "model": "kimi-k2-0711-preview",
+                "model": model,
                 "messages": [{"role": "user", "content": "Say OK"}],
                 "max_tokens": 10
             }).encode('utf-8')
@@ -259,17 +275,26 @@ def kimi_debug():
             resp_json = json.loads(resp.read().decode('utf-8'))
             result['api_tests'][api_name] = {
                 'status': 'success',
+                'url': api_url,
+                'model': model,
                 'response': resp_json['choices'][0]['message']['content'][:50] if resp_json.get('choices') else 'no content'
             }
         except urllib.error.HTTPError as e:
             err_body = e.read().decode('utf-8', errors='ignore')[:2000] if hasattr(e, 'read') else ''
             result['api_tests'][api_name] = {
                 'status': f'error_{e.code}',
+                'url': api_url,
+                'model': model,
                 'error_body_full': err_body,
                 'error_headers': dict(e.headers) if hasattr(e, 'headers') else 'no headers',
             }
         except Exception as e:
-            result['api_tests'][api_name] = {'status': 'exception', 'error': str(e)}
+            result['api_tests'][api_name] = {
+                'status': 'exception',
+                'url': api_url,
+                'model': model,
+                'error': str(e)
+            }
     
     return jsonify(result)
 
