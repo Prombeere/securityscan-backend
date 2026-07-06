@@ -12,10 +12,11 @@ KIMI_MODEL = "kimi-k2-0711-preview"
 
 
 def _get_key():
-    """Read API key dynamically - strips spaces AND quotes that might be in Replit Secrets"""
+    """Read API key dynamically - removes ALL whitespace, newlines, quotes"""
     key = os.environ.get('KIMI_API_KEY', '')
-    # Aggressive cleanup: spaces, quotes, newlines
-    key = key.strip().strip('"').strip("'").strip()
+    # CRITICAL: Keys can contain newlines from copy-paste
+    key = key.replace('\n', '').replace('\r', '').replace(' ', '')
+    key = key.strip().strip('"').strip("'")
     return key
 
 
@@ -121,8 +122,8 @@ WICHTIG: Nur das JSON-Array ausgeben, kein Markdown, keine Erklaerungen davor/da
                 "type": "ai_error",
                 "title": "[K2] API Key ungueltig (401)",
                 "url": target,
-                "evidence": f"Key abgelehnt. Laenge: {len(api_key)} chars. Details: {err_body[:200]}",
-                "remediation": "1. Key in Replit Secrets pruefen (keine Anfuehrungszeichen!). 2. Neuen Key von https://platform.moonshot.cn erstellen."
+                "evidence": f"Key abgelehnt. Details: {err_body[:300]}",
+                "remediation": "1. Key in Replit Secrets als EINZEILER eintragen (keine Zeilenumbrueche!). 2. Neuen Key von https://platform.moonshot.cn erstellen."
             }]
         elif e.code == 429:
             return [{

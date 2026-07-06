@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Security Scanner Backend v3.3 - Main Flask Application
 Orchestrates 24 security scanning modules with real HTTP requests
@@ -32,6 +33,7 @@ def after_request(response):
 @app.route('/api/scan', methods=['OPTIONS'])
 @app.route('/api/modules', methods=['OPTIONS'])
 @app.route('/api/kimi-test', methods=['OPTIONS'])
+@app.route('/api/kimi-debug', methods=['OPTIONS'])
 @app.route('/api/scan/<path:path>', methods=['OPTIONS'])
 def handle_options(path=None):
     response = make_response()
@@ -129,6 +131,7 @@ def index():
             '/api/scan': 'POST - Start a security scan',
             '/api/modules': 'GET - List all modules',
             '/api/kimi-test': 'GET - Test Kimi API key',
+            '/api/kimi-debug': 'GET - Advanced Kimi debug',
             '/health': 'GET - Health check'
         },
         'modules_loaded': len(SCANNER_MODULES),
@@ -156,13 +159,23 @@ def list_modules():
     })
 
 
+def _get_kimi_key():
+    """Read and clean Kimi API key from environment"""
+    key = os.environ.get('KIMI_API_KEY', '')
+    # CRITICAL: Remove ALL whitespace, newlines, quotes - keys must be single-line
+    key = key.replace('\n', '').replace('\r', '').replace(' ', '')
+    key = key.strip().strip('"').strip("'").strip()
+    return key
+
+
 @app.route('/api/kimi-test', methods=['GET'])
 def kimi_test():
-    api_key = os.environ.get('KIMI_API_KEY', '').strip()
+    api_key = _get_kimi_key()
     diagnostics = {
         'key_present': bool(api_key),
         'key_length': len(api_key),
         'key_prefix': api_key[:10] + '...' if len(api_key) > 10 else 'too_short',
+        'key_format_ok': bool(api_key.startswith('sk-') and len(api_key) > 20),
     }
     if not api_key:
         diagnostics['status'] = 'no_key'
@@ -186,20 +199,84 @@ def kimi_test():
         diagnostics['message'] = 'Kimi K2 funktioniert!'
         diagnostics['credits_used'] = True
     except urllib.error.HTTPError as e:
-        err = e.read().decode('utf-8', errors='ignore')[:200] if hasattr(e, 'read') else ''
+        err = e.read().decode('utf-8', errors='ignore')[:500] if hasattr(e, 'read') else ''
         diagnostics['status'] = f'http_error_{e.code}'
+        diagnostics['error_details'] = err
         if e.code == 401:
-            diagnostics['message'] = 'Key ungueltig! Neuen Key von platform.moonshot.cn!'
+            diagnostics['message'] = 'Key ungueltig (401)! Pruefe ob der Key aktiv ist auf platform.moonshot.cn'
         elif e.code == 429:
-            diagnostics['message'] = 'Rate Limit! Spaeter erneut versuchen!'
+            diagnostics['message'] = 'Rate Limit (429)! Zu viele Anfragen.'
         elif e.code == 403:
-            diagnostics['message'] = 'Kein K2-Zugriff! Anderen Key verwenden!'
+            diagnostics['message'] = 'Kein Zugriff (403)! Konto hat moeglicherweise kein Guthaben.'
         else:
             diagnostics['message'] = f'Fehler {e.code}: {err}'
     except Exception as e:
         diagnostics['status'] = 'network_error'
         diagnostics['message'] = str(e)
     return jsonify(diagnostics)
+
+
+@app.route('/api/kimi-debug', methods=['GET'])
+def kimi_debug():
+    """Advanced debug endpoint - tests multiple models and shows key info"""
+    raw_key = os.environ.get('KIMI_API_KEY', '')
+    clean_key = _get_kimi_key()
+    
+    # Key analysis
+    key_chars = []
+    for i, c in enumerate(raw_key[:30]):
+        key_chars.append({'pos': i, 'char': c if c.isprintable() else f'\\x{ord(c):02x}', 'ascii': ord(c)})
+    
+    result = {
+        'key_analysis': {
+            'raw_length': len(raw_key),
+            'clean_length': len(clean_key),
+            'raw_prefix': raw_key[:15] if raw_key else 'EMPTY',
+            'raw_suffix': raw_key[-10:] if len(raw_key) > 10 else 'N/A',
+            'clean_prefix': clean_key[:15] if clean_key else 'EMPTY',
+            'first_10_chars': key_chars,
+            'starts_with_sk': clean_key.startswith('sk-'),
+        },
+        'model_tests': {}
+    }
+    
+    if not clean_key:
+        result['model_tests'] = {'error': 'No key found after cleaning'}
+        return jsonify(result)
+    
+    # Test both models
+    for model_name in ['kimi-k2-0711-preview', 'kimi-latest']:
+        try:
+            import urllib.request
+            req_data = json.dumps({
+                "model": model_name,
+                "messages": [{"role": "user", "content": "Say OK"}],
+                "max_tokens": 10
+            }).encode('utf-8')
+            req = urllib.request.Request(
+                "https://api.moonshot.cn/v1/chat/completions",
+                data=req_data,
+                headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {clean_key}'},
+                method='POST')
+            resp = urllib.request.urlopen(req, timeout=15)
+            resp_json = json.loads(resp.read().decode('utf-8'))
+            result['model_tests'][model_name] = {
+                'status': 'success',
+                'response': resp_json['choices'][0]['message']['content'][:50] if resp_json.get('choices') else 'no content'
+            }
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode('utf-8', errors='ignore')[:500] if hasattr(e, 'read') else ''
+            result['model_tests'][model_name] = {
+                'status': f'error_{e.code}',
+                'error_body': err_body
+            }
+        except Exception as e:
+            result['model_tests'][model_name] = {
+                'status': 'exception',
+                'error': str(e)
+            }
+    
+    return jsonify(result)
 
 
 @app.route('/api/scan', methods=['POST'])
@@ -342,7 +419,7 @@ def scan_single(module):
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({'error': 'Not found', 'available': ['/api/scan', '/api/modules', '/api/kimi-test', '/health']}), 404
+    return jsonify({'error': 'Not found', 'available': ['/api/scan', '/api/modules', '/api/kimi-test', '/api/kimi-debug', '/health']}), 404
 
 
 @app.errorhandler(500)
