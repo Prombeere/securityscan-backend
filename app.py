@@ -1,6 +1,7 @@
 """
-Security Scanner Backend - Main Flask Application
-Orchestrates 15+ security scanning modules with real HTTP requests
+Security Scanner Backend v3.0 - Main Flask Application
+Orchestrates 19 security scanning modules with real HTTP requests
++ Kimi K2-0711-preview AI analysis
 """
 import os
 import sys
@@ -61,6 +62,11 @@ MODULE_DEFINITIONS = [
     ('whois', 'whois_scanner', 'WHOIS-Abfrage: Registrar, Ablaufdatum'),
     ('content', 'content_scanner', 'Content-Scan: robots.txt, sitemap, 404'),
     ('injection', 'injection_scanner', 'Injection-Tests: SQLi, CMDi, NoSQLi, SSTI'),
+    # Go tools (with Python fallbacks)
+    ('gobuster', 'gobuster_scanner', 'Gobuster: Verzeichnis-Brute-Force (500+ Pfade)'),
+    ('ffuf', 'ffuf_scanner', 'FFUF: Parameter-Fuzzing + Virtual-Host-Discovery'),
+    ('httpx', 'httpx_scanner', 'HTTPX: HTTP-Fingerprinting + WAF/CDN-Erkennung'),
+    ('cve', 'cve_scanner', 'CVE-Scanner: Bekannte Schwachstellen pro Technologie'),
 ]
 
 # Robust module loading - each module gets its own try/except
@@ -134,8 +140,8 @@ def index():
     """Root endpoint with API info"""
     return jsonify({
         'name': 'Security Scanner Backend',
-        'version': '2.1.0',
-        'description': 'Comprehensive security scanning with real HTTP requests',
+        'version': '3.0.0',
+        'description': 'Comprehensive security scanning with 19 modules + Kimi K2 AI',
         'endpoints': {
             '/api/scan': 'POST - Start a security scan (JSON body: {"target": "example.com"})',
             '/api/modules': 'GET - List all available scanner modules',
@@ -218,7 +224,7 @@ def scan():
     phase_log = []
 
     # Run scanners in parallel with thread pool
-    with ThreadPoolExecutor(max_workers=min(len(modules_to_run), 8)) as executor:
+    with ThreadPoolExecutor(max_workers=min(len(modules_to_run), 10)) as executor:
         future_to_module = {
             executor.submit(run_scanner, name, mod, target): (name, desc)
             for name, mod, desc in modules_to_run
@@ -227,7 +233,7 @@ def scan():
         for i, future in enumerate(as_completed(future_to_module), 1):
             name, desc = future_to_module[future]
             try:
-                result = future.result(timeout=60)
+                result = future.result(timeout=90)
                 all_results[name] = result
                 if result['findings']:
                     all_findings.extend(result['findings'])
@@ -289,7 +295,7 @@ def scan():
     else:
         risk_level = 'info'
 
-    # Kimi AI Analysis (if available and API key is configured)
+    # Kimi K2 AI Analysis (if available and API key is configured)
     ai_findings = []
     ai_report = None
     ai_enabled = False
@@ -299,14 +305,14 @@ def scan():
         except:
             ai_enabled = False
         if ai_enabled and all_findings:
-            print("[KIMI AI] Starting intelligent analysis...")
+            print("[KIMI K2] Starting deep security analysis...")
             try:
                 ai_findings = kimi_analyzer.analyze_with_kimi(target, all_findings)
                 ai_report = kimi_analyzer.generate_report(target, all_findings)
                 all_findings.extend(ai_findings)
-                print(f"[KIMI AI] Analysis complete: {len(ai_findings)} AI findings")
+                print(f"[KIMI K2] Analysis complete: {len(ai_findings)} AI findings")
             except Exception as e:
-                print(f"[KIMI AI] Error: {e}")
+                print(f"[KIMI K2] Error: {e}")
 
     print(f"\n{'='*60}")
     print(f"[SCAN COMPLETE] Target: {target}")
@@ -314,7 +320,7 @@ def scan():
     print(f"[SCAN COMPLETE] Total findings: {len(all_findings)}")
     print(f"[SCAN COMPLETE] Risk score: {risk_score}/100 ({risk_level})")
     if ai_report:
-        print(f"[SCAN COMPLETE] AI Analysis: YES")
+        print(f"[SCAN COMPLETE] Kimi K2 Analysis: YES")
     print(f"{'='*60}\n")
 
     response = {
@@ -334,6 +340,7 @@ def scan():
         'phases': phase_log,
         'ai_analysis': {
             'enabled': ai_enabled,
+            'model': 'kimi-k2-0711-preview' if ai_enabled else None,
             'findings_count': len(ai_findings),
             'executive_summary': ai_report
         },
@@ -404,6 +411,6 @@ def server_error(error):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
-    print(f"Starting Security Scanner Backend on port {port}")
+    print(f"Starting Security Scanner Backend v3.0 on port {port}")
     print(f"Modules loaded: {len(SCANNER_MODULES)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
