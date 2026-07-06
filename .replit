@@ -1,0 +1,8 @@
+run = "gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 120 app:app"
+modules = ["python-3.12"]
+hidden = [".pythonlibs", "__pycache__"]
+[nix]
+channel = "stable-24_05"
+[deployment]
+run = ["sh", "-c", "gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 120 app:app"]
+deploymentTarget = "cloudrun"
