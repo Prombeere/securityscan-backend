@@ -7,33 +7,12 @@ import sys
 import time
 import json
 import traceback
+import importlib
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-
-# Add modules directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'modules'))
-
-# Import all scanner modules
-from modules import dns_scanner
-from modules import ssl_scanner
-from modules import header_scanner
-from modules import xss_scanner
-from modules import redirect_scanner
-from modules import method_scanner
-from modules import dir_scanner
-from modules import tech_scanner
-from modules import cookie_scanner
-from modules import cors_scanner
-from modules import subdomain_scanner
-from modules import port_scanner
-from modules import whois_scanner
-from modules import content_scanner
-from modules import injection_scanner
-from modules import kimi_analyzer
 
 app = Flask(__name__)
 CORS(app, resources={
@@ -44,24 +23,53 @@ CORS(app, resources={
     }
 })
 
-# Module registry - order matters for phase display
-SCANNER_MODULES = [
-    ('dns', dns_scanner, 'DNS-Analyse: Records, SPF, DMARC, DNSSEC'),
-    ('ssl', ssl_scanner, 'SSL/TLS-Analyse: Zertifikat, Cipher-Suites, HSTS'),
-    ('headers', header_scanner, 'Security-Header: 20+ Header-Pruefungen'),
-    ('xss', xss_scanner, 'XSS-Scan: Reflektierte Payloads, DOM-Sinks'),
-    ('redirect', redirect_scanner, 'Open-Redirect: Parameter-Tests, JS-Redirects'),
-    ('methods', method_scanner, 'HTTP-Methoden: OPTIONS, PUT, DELETE, TRACE'),
-    ('directory', dir_scanner, 'Verzeichnis-Scan: 200+ Pfade, Backups, Configs'),
-    ('tech', tech_scanner, 'Technologie-Erkennung: Frameworks, Bibliotheken'),
-    ('cookies', cookie_scanner, 'Cookie-Analyse: Secure, HttpOnly, SameSite'),
-    ('cors', cors_scanner, 'CORS-Scan: Origin-Reflection, Wildcards'),
-    ('subdomain', subdomain_scanner, 'Subdomain-Enumeration: 100 Subdomains'),
-    ('ports', port_scanner, 'Port-Scan: 22 Ports + Banner-Grabbing'),
-    ('whois', whois_scanner, 'WHOIS-Abfrage: Registrar, Ablaufdatum'),
-    ('content', content_scanner, 'Content-Scan: robots.txt, sitemap, 404'),
-    ('injection', injection_scanner, 'Injection-Tests: SQLi, CMDi, NoSQLi, SSTI'),
+# Add modules directory to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'modules'))
+
+# Module import definitions: (name, module_name, description)
+MODULE_DEFINITIONS = [
+    ('dns', 'dns_scanner', 'DNS-Analyse: Records, SPF, DMARC, DNSSEC'),
+    ('ssl', 'ssl_scanner', 'SSL/TLS-Analyse: Zertifikat, Cipher-Suites, HSTS'),
+    ('headers', 'header_scanner', 'Security-Header: 20+ Header-Pruefungen'),
+    ('xss', 'xss_scanner', 'XSS-Scan: Reflektierte Payloads, DOM-Sinks'),
+    ('redirect', 'redirect_scanner', 'Open-Redirect: Parameter-Tests, JS-Redirects'),
+    ('methods', 'method_scanner', 'HTTP-Methoden: OPTIONS, PUT, DELETE, TRACE'),
+    ('directory', 'dir_scanner', 'Verzeichnis-Scan: 200+ Pfade, Backups, Configs'),
+    ('tech', 'tech_scanner', 'Technologie-Erkennung: Frameworks, Bibliotheken'),
+    ('cookies', 'cookie_scanner', 'Cookie-Analyse: Secure, HttpOnly, SameSite'),
+    ('cors', 'cors_scanner', 'CORS-Scan: Origin-Reflection, Wildcards'),
+    ('subdomain', 'subdomain_scanner', 'Subdomain-Enumeration: 100 Subdomains'),
+    ('ports', 'port_scanner', 'Port-Scan: 22 Ports + Banner-Grabbing'),
+    ('whois', 'whois_scanner', 'WHOIS-Abfrage: Registrar, Ablaufdatum'),
+    ('content', 'content_scanner', 'Content-Scan: robots.txt, sitemap, 404'),
+    ('injection', 'injection_scanner', 'Injection-Tests: SQLi, CMDi, NoSQLi, SSTI'),
 ]
+
+# Robust module loading - each module gets its own try/except
+SCANNER_MODULES = []
+MODULE_LOAD_ERRORS = {}
+
+for mod_name, mod_file, mod_desc in MODULE_DEFINITIONS:
+    try:
+        mod = importlib.import_module(f'modules.{mod_file}')
+        SCANNER_MODULES.append((mod_name, mod, mod_desc))
+        print(f"[OK] Loaded module: {mod_name}")
+    except Exception as e:
+        MODULE_LOAD_ERRORS[mod_name] = str(e)
+        print(f"[WARN] Skipped module {mod_name}: {e}")
+
+# Load kimi analyzer separately (optional - no API key needed for basic function)
+kimi_analyzer = None
+try:
+    kimi_analyzer = importlib.import_module('modules.kimi_analyzer')
+    print("[OK] Loaded module: kimi_analyzer")
+except Exception as e:
+    MODULE_LOAD_ERRORS['kimi'] = str(e)
+    print(f"[WARN] Skipped module kimi_analyzer: {e}")
+
+print(f"[INFO] {len(SCANNER_MODULES)} of {len(MODULE_DEFINITIONS)} scanner modules loaded")
+if MODULE_LOAD_ERRORS:
+    print(f"[INFO] Module load errors: {MODULE_LOAD_ERRORS}")
 
 
 def run_scanner(module_name, module, target):
@@ -108,24 +116,28 @@ def index():
     """Root endpoint with API info"""
     return jsonify({
         'name': 'Security Scanner Backend',
-        'version': '2.0.0',
-        'description': 'Comprehensive security scanning with 15 real scanner modules',
+        'version': '2.1.0',
+        'description': 'Comprehensive security scanning with real HTTP requests',
         'endpoints': {
             '/api/scan': 'POST - Start a security scan (JSON body: {"target": "example.com"})',
             '/api/modules': 'GET - List all available scanner modules',
             '/health': 'GET - Health check'
         },
-        'modules': [name for name, _, _ in SCANNER_MODULES]
+        'modules_loaded': len(SCANNER_MODULES),
+        'modules_total': len(MODULE_DEFINITIONS),
+        'modules': [name for name, _, _ in SCANNER_MODULES],
+        'module_errors': MODULE_LOAD_ERRORS
     })
 
 
 @app.route('/health')
 def health():
-    """Health check endpoint"""
+    """Health check endpoint - ALWAYS returns 200"""
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.utcnow().isoformat(),
-        'modules_loaded': len(SCANNER_MODULES)
+        'modules_loaded': len(SCANNER_MODULES),
+        'modules_total': len(MODULE_DEFINITIONS)
     })
 
 
@@ -139,7 +151,8 @@ def list_modules():
                 'description': desc,
             }
             for name, _, desc in SCANNER_MODULES
-        ]
+        ],
+        'errors': MODULE_LOAD_ERRORS
     })
 
 
@@ -171,6 +184,13 @@ def scan():
         ]
     else:
         modules_to_run = SCANNER_MODULES
+
+    if not modules_to_run:
+        return jsonify({
+            'error': 'No modules available',
+            'message': 'No scanner modules could be loaded. Check server logs.',
+            'module_errors': MODULE_LOAD_ERRORS
+        }), 500
 
     print(f"\n{'='*60}")
     print(f"[SCAN START] Target: {target}")
@@ -254,18 +274,24 @@ def scan():
     else:
         risk_level = 'info'
 
-    # Kimi AI Analysis (if API key is configured)
+    # Kimi AI Analysis (if available and API key is configured)
     ai_findings = []
     ai_report = None
-    if kimi_analyzer.check_api_key() and all_findings:
-        print("[KIMI AI] Starting intelligent analysis...")
+    ai_enabled = False
+    if kimi_analyzer is not None:
         try:
-            ai_findings = kimi_analyzer.analyze_with_kimi(target, all_findings)
-            ai_report = kimi_analyzer.generate_report(target, all_findings)
-            all_findings.extend(ai_findings)
-            print(f"[KIMI AI] Analysis complete: {len(ai_findings)} AI findings")
-        except Exception as e:
-            print(f"[KIMI AI] Error: {e}")
+            ai_enabled = kimi_analyzer.check_api_key()
+        except:
+            ai_enabled = False
+        if ai_enabled and all_findings:
+            print("[KIMI AI] Starting intelligent analysis...")
+            try:
+                ai_findings = kimi_analyzer.analyze_with_kimi(target, all_findings)
+                ai_report = kimi_analyzer.generate_report(target, all_findings)
+                all_findings.extend(ai_findings)
+                print(f"[KIMI AI] Analysis complete: {len(ai_findings)} AI findings")
+            except Exception as e:
+                print(f"[KIMI AI] Error: {e}")
 
     print(f"\n{'='*60}")
     print(f"[SCAN COMPLETE] Target: {target}")
@@ -292,7 +318,7 @@ def scan():
         },
         'phases': phase_log,
         'ai_analysis': {
-            'enabled': kimi_analyzer.check_api_key(),
+            'enabled': ai_enabled,
             'findings_count': len(ai_findings),
             'executive_summary': ai_report
         },
