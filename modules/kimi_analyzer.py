@@ -12,8 +12,11 @@ KIMI_MODEL = "kimi-k2-0711-preview"
 
 
 def _get_key():
-    """Read API key dynamically - works even if key was set after server start"""
-    return os.environ.get('KIMI_API_KEY', '').strip()
+    """Read API key dynamically - strips spaces AND quotes that might be in Replit Secrets"""
+    key = os.environ.get('KIMI_API_KEY', '')
+    # Aggressive cleanup: spaces, quotes, newlines
+    key = key.strip().strip('"').strip("'").strip()
+    return key
 
 
 def analyze_with_kimi(target, findings):
@@ -118,8 +121,8 @@ WICHTIG: Nur das JSON-Array ausgeben, kein Markdown, keine Erklaerungen davor/da
                 "type": "ai_error",
                 "title": "[K2] API Key ungueltig (401)",
                 "url": target,
-                "evidence": f"Key abgelehnt. Details: {err_body[:200]}",
-                "remediation": "Neuen Key von https://platform.moonshot.cn erstellen. Key braucht K2-Zugriff."
+                "evidence": f"Key abgelehnt. Laenge: {len(api_key)} chars. Details: {err_body[:200]}",
+                "remediation": "1. Key in Replit Secrets pruefen (keine Anfuehrungszeichen!). 2. Neuen Key von https://platform.moonshot.cn erstellen."
             }]
         elif e.code == 429:
             return [{
