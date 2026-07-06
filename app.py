@@ -11,17 +11,35 @@ import importlib
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask import Flask, request, jsonify, make_response
 
 app = Flask(__name__)
-CORS(app, resources={
-    r"/api/*": {
-        "origins": "*",
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
-    }
-})
+
+# ============== CORS - Manual (covers ALL routes) ==============
+@app.after_request
+def after_request(response):
+    """Add CORS headers to every single response"""
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    response.headers.add('Access-Control-Max-Age', '86400')
+    return response
+
+@app.route('/', methods=['OPTIONS'])
+@app.route('/health', methods=['OPTIONS'])
+@app.route('/api/scan', methods=['OPTIONS'])
+@app.route('/api/modules', methods=['OPTIONS'])
+@app.route('/api/scan/<path:path>', methods=['OPTIONS'])
+def handle_options(path=None):
+    """Handle all OPTIONS preflight requests"""
+    response = make_response()
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    response.headers.add('Access-Control-Max-Age', '86400')
+    return response, 204
 
 # Add modules directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'modules'))
@@ -156,12 +174,9 @@ def list_modules():
     })
 
 
-@app.route('/api/scan', methods=['POST', 'OPTIONS'])
+@app.route('/api/scan', methods=['POST'])
 def scan():
     """Main scan endpoint - runs all scanner modules"""
-    if request.method == 'OPTIONS':
-        return jsonify({'status': 'ok'}), 200
-
     data = request.get_json(silent=True) or {}
     target = data.get('target', '').strip()
 
@@ -332,12 +347,9 @@ def scan():
     return jsonify(response)
 
 
-@app.route('/api/scan/<module>', methods=['POST', 'OPTIONS'])
+@app.route('/api/scan/<module>', methods=['POST'])
 def scan_single(module):
     """Run a single scanner module"""
-    if request.method == 'OPTIONS':
-        return jsonify({'status': 'ok'}), 200
-
     data = request.get_json(silent=True) or {}
     target = data.get('target', '').strip()
 
